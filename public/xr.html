@@ -210,8 +210,13 @@
           this.groundArrows = [];
           this.shadeSegments = [];
 
+          // worldGroup wraps the routeGroup so IMU rotation and the preview
+          // journey-cam transform apply to the projection (and only the
+          // projection — the spatial panels stay head-locked).
+          this.worldGroup = new THREE.Group();
+          this.add(this.worldGroup);
           this.routeGroup = new THREE.Group();
-          this.add(this.routeGroup);
+          this.worldGroup.add(this.routeGroup);
 
           this.buildWebcamBackground();
           this.buildFloor();
@@ -233,11 +238,28 @@
           this.previewIndex = 0;
           this.previewNextSwitchAt = 0;
           this.previewHighlightNode = null;
-          this.previewCycleSecs = 3.0;
+          this.previewCycleSecs = 2.4;
           this.liveBeacon = null;
           this.liveAccuracy = null;
 
+          // Journey-cam state: t in [0..1] along the interpolated previewPath.
+          // Advances on each animation frame; lingers near each target.
+          this.previewPath = null;
+          this.previewPathT = 0;
+          this.previewSpeed = 0.045; // fraction-per-second; tuned for ~22s full lap
+          this.previewLingerUntil = 0;
+          this.previewLastLockedIdx = -1;
+
+          // IMU offset (lerped). Applied to a worldGroup that wraps routeGroup,
+          // so tilting the phone rotates the projection like an AR overlay.
+          this.imuTargetYaw = 0;
+          this.imuTargetPitch = 0;
+          this.imuYaw = 0;
+          this.imuPitch = 0;
+          this.imuAvailable = false;
+
           this.initExperienceMode();
+          this.initImuTracking();
 
           // Listen for live ticks from the host page.
           window.addEventListener('message', e => {
@@ -264,6 +286,163 @@
             this.startLiveTracking();
             return;
           }
+        }
+
+        // ------------------------------------------------------------------------------------
+        // IMU tracking — DeviceOrientationEvent integration. iOS needs an
+        // explicit user-gesture permission call; everywhere else the listener
+        // attaches immediately. The result is a world-locked AR feel: tilting
+        // the phone rotates the route projection.
+        // ------------------------------------------------------------------------------------
+        initImuTracking() {
+          const handle = (event) => {
+            // alpha = compass heading (0-360), beta = front/back tilt, gamma = roll
+            if (event.alpha == null) return;
+            this.imuAvailable = true;
+            // Yaw: invert compass so turning right rotates the world left
+            // (giving the illusion of the world standing still as you turn).
+            this.imuTargetYaw = -THREE.MathUtils.degToRad(event.alpha);
+            // Pitch: re-zero so phone-flat (~90deg beta) is no pitch.
+            this.imuTargetPitch = THREE.MathUtils.degToRad((event.beta || 90) - 90) * 0.4;
+          };
+
+          const attach = () => {
+            window.addEventListener('deviceorientation', handle, true);
+            // Some browsers (Chrome) need the explicit `absolute` variant
+            // for compass-anchored alpha.
+            window.addEventListener('deviceorientationabsolute', handle, true);
+          };
+
+          // iOS 13+ Safari gates DeviceOrientationEvent behind a permission
+          // prompt that must originate from a user gesture. Surface a one-tap
+          // overlay to bridge that.
+          const needsPermission = typeof DeviceOrientationEvent !== 'undefined'
+            && typeof DeviceOrientationEvent.requestPermission === 'function';
+
+          if (!needsPermission) {
+            attach();
+            return;
+          }
+
+          const overlay = document.createElement('div');
+          overlay.style.cssText = `
+            position: fixed; inset: 0; z-index: 9999;
+            display: flex; align-items: flex-end; justify-content: center;
+            padding-bottom: 24px;
+            pointer-events: none; font-family: system-ui, sans-serif;
+          `;
+          const button = document.createElement('button');
+          button.textContent = '📱  Tap to enable motion tracking';
+          button.style.cssText = `
+            pointer-events: auto;
+            background: rgba(15, 23, 42, 0.75);
+            color: #fbbc05; border: 1px solid #fbbc05;
+            border-radius: 999px; padding: 10px 18px;
+            font-size: 13px; font-weight: 700;
+            letter-spacing: 0.04em; text-transform: uppercase;
+            backdrop-filter: blur(6px);
+            cursor: pointer; box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+          `;
+          button.onclick = async () => {
+            try {
+              const state = await DeviceOrientationEvent.requestPermission();
+              if (state === 'granted') attach();
+            } catch (err) {
+              console.warn('[IMU] DeviceOrientationEvent permission failed:', err);
+            }
+            overlay.remove();
+          };
+          overlay.appendChild(button);
+          document.body.appendChild(overlay);
+        }
+
+        // ------------------------------------------------------------------------------------
+        // Preview journey path — interpolate dense samples between every
+        // sequential pair of preview targets so we can fly the camera along
+        // a smooth curve rather than teleporting between nodes.
+        // ------------------------------------------------------------------------------------
+        buildPreviewPath() {
+          const targets = this.previewTargets();
+          if (targets.length < 2) return null;
+          const samples = [];
+          const SUBSTEPS = 80;
+          for (let i = 0; i < targets.length - 1; i++) {
+            const a = targets[i].mesh.position;
+            const b = targets[i + 1].mesh.position;
+            for (let s = 0; s < SUBSTEPS; s++) {
+              const t = s / SUBSTEPS;
+              samples.push({
+                pos: new THREE.Vector3().lerpVectors(a, b, t),
+                targetIdx: i,
+                tWithinSeg: t
+              });
+            }
+          }
+          samples.push({
+            pos: targets[targets.length - 1].mesh.position.clone(),
+            targetIdx: targets.length - 1,
+            tWithinSeg: 1
+          });
+          return { samples, targets, totalLength: samples.length };
+        }
+
+        // Lock the highlight + banner onto a preview target index. Extracted
+        // so both the cycle-based tick and the journey-cam tick can call it.
+        lockOnPreviewTarget(idx) {
+          const targets = this.previewTargets();
+          if (idx < 0 || idx >= targets.length) return;
+
+          // Restore the previously-highlighted mesh
+          if (this.previewHighlightNode) {
+            this.previewHighlightNode.scale.setScalar(1.0);
+            if (this.previewHighlightNode.material?.emissiveIntensity != null) {
+              this.previewHighlightNode.material.emissiveIntensity = 0.25;
+            }
+            const orig = this.previewHighlightNode.userData?.originalColor;
+            if (orig != null && this.previewHighlightNode.material?.color) {
+              this.previewHighlightNode.material.color.setHex(orig);
+              if (this.previewHighlightNode.material.emissive) {
+                this.previewHighlightNode.material.emissive.setHex(orig);
+              }
+            }
+          }
+
+          const t = targets[idx];
+          const flagHex = (flagColors[t.projectedFlag] || flagColors.white).hex;
+          if (t.mesh.material?.color) {
+            t.mesh.material.color.setHex(flagHex);
+            if (t.mesh.material.emissive) {
+              t.mesh.material.emissive.setHex(flagHex);
+            }
+          }
+          t.mesh.scale.setScalar(1.7);
+          if (t.mesh.material?.emissiveIntensity != null) {
+            t.mesh.material.emissiveIntensity = 1.0;
+          }
+          this.previewHighlightNode = t.mesh;
+          this.previewIndex = idx;
+
+          const kindGlyph = { origin: '◉', waypoint: '◆', refuge: '✚', break: '💧' }[t.kind] || '•';
+          const distanceLabel = t.cumulativeMeters >= 1000
+            ? `${(t.cumulativeMeters / 1000).toFixed(1)} km`
+            : `${t.cumulativeMeters} m`;
+          this.previewBannerText?.setText?.(`${kindGlyph} ${t.label.toUpperCase()}\n+${t.minutesFromStart}min · ${distanceLabel} from start`);
+          this.previewHeatText?.setText?.(`Arrive ${t.arrivalClock} · projected ${t.projectedWetBulbF}°F WBGT · ${t.projectedFlag.toUpperCase()} FLAG`);
+
+          // Voice escalation announcements
+          if (t.projectedFlag !== this.previousProjectedFlag && this.previousProjectedFlag != null) {
+            const msg = `Flag rising to ${t.projectedFlag} at ${t.label}, ${t.projectedWetBulbF} degrees wet bulb.`;
+            try {
+              if (xb.core.sound.speechSynthesizer) {
+                xb.core.sound.speechSynthesizer.speak(msg);
+              } else if (window.speechSynthesis) {
+                window.speechSynthesis.speak(new SpeechSynthesisUtterance(msg));
+              }
+            } catch { /* ignore */ }
+          }
+          this.previousProjectedFlag = t.projectedFlag;
+
+          xb.core.sound.soundSynthesizer.playPresetTone('CLICK', 0.4);
         }
 
         // Visible target list used by preview mode — origin, waypoints, refuges,
@@ -351,7 +530,7 @@
         buildPreviewBanner() {
           // Three-row status panel: title, current stop, simulated clock + WBGT.
           this.previewPanel = new xb.SpatialPanel({
-            width: 1.15, height: 0.28, backgroundColor: '#0f172af2', useDefaultPosition: false
+            width: 1.15, height: 0.28, backgroundColor: '#0f172a55', useDefaultPosition: false
           });
           const grid = this.previewPanel.addGrid();
           grid.addRow({ weight: 0.28 }).addText({
@@ -454,7 +633,7 @@
         // ------------------------------------------------------------------------------------
         buildLiveStatusPanel() {
           this.livePanel = new xb.SpatialPanel({
-            width: 1.2, height: 0.4, backgroundColor: '#0f172af2', useDefaultPosition: false
+            width: 1.2, height: 0.4, backgroundColor: '#0f172a55', useDefaultPosition: false
           });
           const grid = this.livePanel.addGrid();
           grid.addRow({ weight: 0.22 }).addText({
@@ -1058,7 +1237,7 @@
         // ------------------------------------------------------------------------------------
         createControlPanel() {
           this.controlPanel = new xb.SpatialPanel({
-            width: 1.6, height: 1.1, backgroundColor: '#0f172aa5', useDefaultPosition: false
+            width: 1.6, height: 1.1, backgroundColor: '#0f172a4d', useDefaultPosition: false
           });
           const grid = this.controlPanel.addGrid();
 
@@ -1096,7 +1275,7 @@
 
         createHeadingPanel() {
           this.headingPanel = new xb.SpatialPanel({
-            width: 1.0, height: 0.5, backgroundColor: '#0f172ae5', useDefaultPosition: false
+            width: 1.0, height: 0.5, backgroundColor: '#0f172a55', useDefaultPosition: false
           });
           const grid = this.headingPanel.addGrid();
           grid.addRow({ weight: 0.3 }).addText({
@@ -1113,7 +1292,7 @@
 
         createWatchPanel() {
           this.watchPanel = new xb.SpatialPanel({
-            width: 0.9, height: 0.32, backgroundColor: '#0f172af2', useDefaultPosition: false
+            width: 0.9, height: 0.32, backgroundColor: '#0f172a55', useDefaultPosition: false
           });
           const grid = this.watchPanel.addGrid();
           grid.addRow({ weight: 0.4 }).addText({
@@ -1241,14 +1420,78 @@
           //   - static: gentle sway (original behavior)
           //   - preview: ease toward the highlighted target's angle
           //   - live: hold the group level so the GPS beacon stays oriented north
+          const delta = xb.getDeltaTime();
+
+          // --- IMU offset (applied to worldGroup so panels stay head-locked) ---
+          // Lerp toward target orientation for buttery smoothness. Skip pitch
+          // entirely on live mode so the GPS beacon stays interpretable.
+          if (this.imuAvailable) {
+            const yawLerp = 0.18;
+            const pitchLerp = 0.12;
+            // Shortest-arc lerp for yaw (handles wrap-around at ±π)
+            const yawDiff = ((this.imuTargetYaw - this.imuYaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+            this.imuYaw += yawDiff * yawLerp;
+            this.imuPitch += (this.imuTargetPitch - this.imuPitch) * pitchLerp;
+          }
+
           if (xrMode === 'preview') {
-            this.tickPreview();
-            if (this.previewTargetGroupY != null) {
-              const cur = this.routeGroup.rotation.y;
-              this.routeGroup.rotation.y = cur + (this.previewTargetGroupY - cur) * 0.04;
+            // ============ Playable journey camera ============================
+            // The user is taken FOR a ride: build a dense sampled path through
+            // every preview target, advance a parameter t along it, and
+            // position the worldGroup as the *inverse* of a virtual camera
+            // riding the path. The world flows past the camera.
+            if (!this.previewPath) {
+              this.previewPath = this.buildPreviewPath();
+              this.routeGroup.scale.setScalar(5.5); // Camera is "inside" the projection
+              if (this.previewPath) this.lockOnPreviewTarget(0);
+            }
+            if (this.previewPath) {
+              const samples = this.previewPath.samples;
+              const N = samples.length - 1;
+              // Linger near each target for previewCycleSecs; otherwise advance.
+              if (this.animationTime > this.previewLingerUntil) {
+                this.previewPathT = (this.previewPathT + this.previewSpeed * delta) % 1.0;
+              }
+              const idx = Math.min(N, Math.floor(this.previewPathT * N));
+              const nextIdx = Math.min(N, idx + 1);
+              const sample = samples[idx];
+              const lookAhead = samples[Math.min(N, idx + 8)];
+
+              // On reaching a new target, lock on + linger.
+              if (sample.targetIdx !== this.previewLastLockedIdx && sample.tWithinSeg < 0.1) {
+                this.previewLastLockedIdx = sample.targetIdx;
+                this.lockOnPreviewTarget(sample.targetIdx);
+                this.previewLingerUntil = this.animationTime + this.previewCycleSecs;
+              }
+
+              // Compute look-direction from current sample toward lookAhead.
+              const dirX = lookAhead.pos.x - sample.pos.x;
+              const dirZ = lookAhead.pos.z - sample.pos.z;
+              const heading = Math.atan2(dirX, -dirZ);
+
+              // World transform: move the world so the virtual camera lands
+              // at origin, rotated so its forward is -Z.
+              const scale = this.routeGroup.scale.x; // matches the projection scale
+              const targetPosX = -sample.pos.x * scale;
+              const targetPosZ = -sample.pos.z * scale;
+              const targetRotY = -heading + this.imuYaw;
+
+              // Lerp for smoothness — fast enough to feel responsive, slow
+              // enough to avoid jitter from the substep cadence.
+              const posLerp = 0.18;
+              const rotLerp = 0.12;
+              const yawDiff2 = ((targetRotY - this.worldGroup.rotation.y + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+              this.worldGroup.position.x += (targetPosX - this.worldGroup.position.x) * posLerp;
+              this.worldGroup.position.z += (targetPosZ - this.worldGroup.position.z) * posLerp;
+              this.worldGroup.position.y = -0.5 + this.imuPitch * 0.3; // slight downward tilt, IMU-modulated
+              this.worldGroup.rotation.y += yawDiff2 * rotLerp;
+              this.worldGroup.rotation.x = this.imuPitch * 0.6;
             }
           } else if (xrMode === 'live') {
-            // Hold north-up. Pulse the live beacon if present.
+            // North-up + IMU yaw so the beacon stays interpretable.
+            this.worldGroup.position.set(0, 0, 0);
+            this.worldGroup.rotation.x = this.imuPitch * 0.4;
+            this.worldGroup.rotation.y += (this.imuYaw - this.worldGroup.rotation.y) * 0.15;
             this.routeGroup.rotation.y = 0;
             if (this.liveBeacon) {
               const pulse = 1.0 + 0.25 * Math.sin(this.animationTime * 4.0);
@@ -1263,7 +1506,11 @@
               this.refreshLiveReadout();
             }
           } else {
-            this.routeGroup.rotation.y = 0.05 * Math.sin(this.animationTime * 0.2);
+            // Static: gentle sway + IMU yaw stacked on top.
+            this.worldGroup.position.set(0, 0, 0);
+            this.worldGroup.rotation.x = this.imuPitch * 0.3;
+            const sway = 0.05 * Math.sin(this.animationTime * 0.2);
+            this.worldGroup.rotation.y += ((sway + this.imuYaw) - this.worldGroup.rotation.y) * 0.1;
           }
 
           // Drive Photorealistic 3D Tiles loading + LOD selection. Camera/renderer are
@@ -1284,10 +1531,14 @@
             }
           });
 
-          // Pulse break beacons independently — faster cadence = more urgency
+          // Pulse break beacons independently — faster cadence = more urgency.
+          // Skip the currently-highlighted preview node so its lock-on scale
+          // (1.7x) doesn't get overwritten by the pulse on every frame.
           const breakPulse = 1.0 + 0.25 * Math.sin(this.animationTime * 5.0);
           this.breakBeacons.forEach(({ orb, beam }) => {
-            orb.scale.setScalar(breakPulse);
+            if (orb !== this.previewHighlightNode) {
+              orb.scale.setScalar(breakPulse);
+            }
             beam.material.opacity = 0.35 + 0.25 * Math.sin(this.animationTime * 4.0);
           });
 
