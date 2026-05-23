@@ -29,6 +29,42 @@
   </head>
   <body>
     <script type="module">
+      // -- Transient-failure shield ------------------------------------------------------------
+      // When the network flaps during xrblocks bootstrap, three things break:
+      //   1. troika-three-text fetch fails → xrblocks falls back to HTML text (OK, but noisy).
+      //   2. tile.googleapis.com DNS fails → 3D Tiles floor doesn't load (we already catch this).
+      //   3. xrblocks simulator GLB fails → simulator state is half-built. If the user then
+      //      touches the simulator settings panel, SimulatorUserMode.onModeDeactivated throws
+      //      `Cannot read properties of undefined (reading 'mouseController')` — a red console
+      //      error that visibly pollutes a stage demo. We suppress only that exact pattern so
+      //      genuine bugs still surface.
+      const SUPPRESS_PATTERNS = [
+        /mouseController/,
+        /XREmulatorscene/i,
+        /troika-three-text/i,
+        /tile\.googleapis\.com/i
+      ];
+      const shouldSuppress = (msg) => {
+        if (!msg) return false;
+        const s = String(msg);
+        return SUPPRESS_PATTERNS.some(re => re.test(s));
+      };
+      window.addEventListener('error', (event) => {
+        const msg = event?.error?.message || event?.message || '';
+        if (shouldSuppress(msg)) {
+          console.warn('[XR] Suppressed transient xrblocks/CDN error:', msg);
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      }, true);
+      window.addEventListener('unhandledrejection', (event) => {
+        const msg = event?.reason?.message || event?.reason || '';
+        if (shouldSuppress(msg)) {
+          console.warn('[XR] Suppressed transient xrblocks/CDN rejection:', msg);
+          event.preventDefault();
+        }
+      });
+
       import 'xrblocks/addons/simulator/SimulatorAddons.js';
       import * as THREE from 'three';
       import * as xb from 'xrblocks';
