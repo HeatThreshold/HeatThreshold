@@ -821,9 +821,10 @@ function Dashboard() {
           {/* Map Embed Card */}
           <section className="col-span-1 md:col-span-3 md:row-span-4 bg-white rounded-2xl border border-slate-200 p-4 flex flex-col justify-between hover:border-slate-300 hover:shadow-md transition-all duration-300 relative overflow-hidden shadow-sm">
             <div className="flex-1 min-h-[220px]">
-              <MapEmbed 
-                spatial={currentPlan.spatial} 
-                coolingStops={currentPlan.coolingStops} 
+              <MapEmbed
+                spatial={currentPlan.spatial}
+                coolingStops={currentPlan.coolingStops}
+                activity={currentPlan.request.activity}
               />
             </div>
           </section>

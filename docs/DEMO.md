@@ -54,7 +54,19 @@ Pace-aware: if the activity string contains "bike/biking/cycling", pace is 4.5 m
 
 (Skip this beat if you only have 90 seconds total.)
 
-### 2:05 – 2:20 — Antigravity (if shipped, otherwise cut)
+### 2:05 – 2:25 — Live Activity Mode (optional — strongest on phone)
+
+Tap the red **● Live Activity Mode** button. The XR modal opens in `mode=live` and asks for GPS permission.
+
+> "If I'm actually on the route, the agent paints my live GPS as a pulsing beacon, then projects forward: I'm at 78 degrees right now, white flag — but the nearest refuge is 340 meters away, ETA 2:38 PM, and by the time I get there it'll already be 80 degrees and green flag."
+
+Voice synth fires the moment the current flag crosses into yellow / red / black:
+
+> *"Heat alert. Conditions have risen to red flag, 88 degrees wet bulb. Nearest refuge Pier 7 Rest Area, 340 meters away."*
+
+This beat works best from your phone (real GPS) or from a wifi-located laptop on a route fixture that's geographically close to where you actually are. **If you're indoors and demoing from a laptop, skip this beat** — IP geolocation may not land you on the demoed route and the beacon will look off.
+
+### 2:25 – 2:40 — Antigravity (if shipped, otherwise cut)
 
 Switch to the Antigravity IDE chat. Run `/threshold-plan bike to Zilker at 1pm`.
 
@@ -89,11 +101,13 @@ Open `src/lib/agents/managedAgents.ts` in the IDE.
 - [ ] Browser tab 1: production dashboard (`/`), live agent path warmed up, Zilker preset loaded (red-flag DELAY verdict is the most dramatic).
 - [ ] Browser tab 2: `?replay=<known-good-runId>` for the safety net beat.
 - [ ] Browser tab 3: `/trace/<runId>` for the span tree walk.
-- [ ] **Test the Cinematic Preview button** once before going on stage — confirm the journey banner shows arrival clocks + projected WBGT + flag escalation. If wet-bulb stays static the URL is missing the `time=` param.
+- [ ] **Test ◆ Cinematic Preview** once before going on stage — confirm the journey banner shows arrival clocks + projected WBGT + flag escalation. If wet-bulb stays static the URL is missing `time=`. If the polyline runs straight across water it's missing `GOOGLE_MAPS_PLATFORM_KEY` on the client.
+- [ ] **Test ● Live Activity Mode** once if you plan to demo it. Confirm the GPS beacon lands somewhere sensible and the NOW / ETA readout populates. Skip the live beat from a laptop indoors — phone is better. From the phone, accept the GPS permission prompt before going on stage so the demo doesn't pause.
+- [ ] **Eyeball the map polyline.** It should follow real bike lanes / walking paths (not draw straight lines across water or buildings). If it's straight lines, hard-reload the dashboard — the client-side `DirectionsService` race may have lost.
 - [ ] Terminal: `npm run threshold-plan -- --demo zilker-bike` queued.
 - [ ] IDE: `src/lib/agents/managedAgents.ts` already open and scrolled to `SUBAGENT_SPECS`.
 - [ ] Antigravity (if shipped): `/threshold-plan` skill registered, chat panel open.
-- [ ] Speaker volume up: the preview mode voices "Flag rising to red at Crissy Field, 88 degrees wet bulb" — that line is the demo punchline.
+- [ ] **Speaker volume up.** Both Preview and Live escalations have a voice punchline ("Flag rising to red at Crissy Field…" / "Heat alert. Conditions have risen to red flag…"). One of those is your strongest line.
 - [ ] Phone: 30-second screen recording of the happy path queued as last-resort backup.
 
 ## What to never say on stage

@@ -6,6 +6,105 @@ import { APIProvider, Map, AdvancedMarker, Pin, InfoWindow, useMap } from '@vis.
 interface MapEmbedProps {
   spatial: SpatialData;
   coolingStops: CoolingStop[];
+  activity?: string;
+}
+
+/**
+ * Maps a free-form activity string to a Google Maps TravelMode. Trail biking,
+ * road cycling, etc. all want BICYCLING so the polyline lands on bike lanes;
+ * jogging/walking/hiking want WALKING (no running mode in the API).
+ */
+function travelModeForActivity(activity: string | undefined): google.maps.TravelMode {
+  const a = (activity || '').toLowerCase();
+  if (/bik(e|ing)|cycl(e|ing)|pedal/.test(a)) return google.maps.TravelMode.BICYCLING;
+  if (/driv(e|ing)|\bcar\b|truck/.test(a)) return google.maps.TravelMode.DRIVING;
+  return google.maps.TravelMode.WALKING;
+}
+
+/**
+ * ClientDirections — runs Google Maps DirectionsService against the SDK
+ * already loaded in the browser, so the polyline conforms to real bike lanes
+ * / walking paths / roads even for demoFixtures presets that ship without a
+ * pre-computed directionsPath. Origin and destination are pinned; refuges and
+ * middle waypoints become optimized via points.
+ */
+function ClientDirections({
+  spatial,
+  coolingStops,
+  activity,
+  onPath
+}: {
+  spatial: SpatialData;
+  coolingStops: CoolingStop[];
+  activity: string | undefined;
+  onPath: (points: Array<{ lat: number; lng: number }>) => void;
+}) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (!map) return;
+    if (typeof window === 'undefined' || !window.google?.maps) return;
+    if (!spatial?.origin) return;
+
+    const waypoints = spatial.waypoints || [];
+    if (waypoints.length === 0 && coolingStops.length === 0) {
+      // No via points — just a point, leave the polyline empty.
+      onPath([]);
+      return;
+    }
+
+    // Destination is the last waypoint when present; otherwise the origin
+    // (degenerate "tour" — still valid for refuge routing around a single spot).
+    const dest = waypoints[waypoints.length - 1] || spatial.origin;
+    const middleWaypoints = waypoints.slice(0, -1);
+
+    // Combine middle waypoints + refuges as via points so DirectionsService
+    // re-orders them for shortest total distance.
+    const via: google.maps.DirectionsWaypoint[] = [
+      ...middleWaypoints.map(w => ({ location: { lat: w.lat, lng: w.lng }, stopover: false })),
+      ...coolingStops.map(s => ({ location: { lat: s.lat, lng: s.lng }, stopover: false }))
+    ];
+
+    const service = new google.maps.DirectionsService();
+    service.route(
+      {
+        origin: { lat: spatial.origin.lat, lng: spatial.origin.lng },
+        destination: { lat: dest.lat, lng: dest.lng },
+        waypoints: via,
+        optimizeWaypoints: true,
+        travelMode: travelModeForActivity(activity),
+        provideRouteAlternatives: false
+      },
+      (result, status) => {
+        if (status !== google.maps.DirectionsStatus.OK || !result?.routes?.[0]) {
+          console.warn('[ClientDirections] route() returned', status);
+          onPath([]);
+          return;
+        }
+        // Flatten every step's lat_lngs into one polyline. overview_path is
+        // simpler but coarser; the per-step path gives crisper curves.
+        const path: Array<{ lat: number; lng: number }> = [];
+        for (const leg of result.routes[0].legs) {
+          for (const step of leg.steps) {
+            const stepPath = step.path || (step as any).lat_lngs;
+            if (Array.isArray(stepPath)) {
+              for (const p of stepPath) path.push({ lat: p.lat(), lng: p.lng() });
+            }
+          }
+        }
+        onPath(path);
+      }
+    );
+  }, [
+    map,
+    spatial?.origin?.lat,
+    spatial?.origin?.lng,
+    JSON.stringify(spatial?.waypoints),
+    JSON.stringify(coolingStops.map(s => [s.lat, s.lng])),
+    activity
+  ]);
+
+  return null;
 }
 
 /**
@@ -122,12 +221,15 @@ function RoutePolyline({ points }: { points: Array<{ lat: number; lng: number }>
   return null;
 }
 
-export function MapEmbed({ spatial, coolingStops }: MapEmbedProps) {
+export function MapEmbed({ spatial, coolingStops, activity }: MapEmbedProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const leafletMapRef = useRef<any>(null);
   const [isLeafletLoaded, setIsLeafletLoaded] = useState(false);
   const [hasMapError, setHasMapError] = useState(false);
   const [selectedStop, setSelectedStop] = useState<CoolingStop | null>(null);
+  // ClientDirections-fetched path. Wins over spatial.directionsPath when set
+  // so demoFixtures (which ship without directionsPath) also get real roads.
+  const [clientPath, setClientPath] = useState<Array<{ lat: number; lng: number }> | null>(null);
   
   // Choose GIS Engine
   const gmpApiKey = process.env.GOOGLE_MAPS_PLATFORM_KEY || '';
@@ -348,6 +450,16 @@ export function MapEmbed({ spatial, coolingStops }: MapEmbedProps) {
                 {/* Auto-frame the route whenever spatial data changes */}
                 <MapController spatial={spatial} coolingStops={coolingStops} />
 
+                {/* Fetch real road-conforming directions client-side so even
+                    demoFixtures presets (which ship without a server-computed
+                    directionsPath) get bike-lane / walking-path polylines. */}
+                <ClientDirections
+                  spatial={spatial}
+                  coolingStops={coolingStops}
+                  activity={activity}
+                  onPath={setClientPath}
+                />
+
                 {/* Origin Marker — heavier visual weight */}
                 <AdvancedMarker
                   position={{ lat: spatial.origin.lat, lng: spatial.origin.lng }}
@@ -433,18 +545,22 @@ export function MapEmbed({ spatial, coolingStops }: MapEmbedProps) {
                   </InfoWindow>
                 )}
 
-                {/* Direct Polyline Connection — uses the optimized directionsPath
-                    from RouteOptimizationSubAgent (threads through every refuge in
-                    TSP-optimal order) when available, else falls back to a straight
-                    connector through the explicit waypoints. */}
+                {/* Polyline source precedence:
+                    1. ClientDirections result (real road-conforming, runs against
+                       the browser SDK so it works for demoFixtures too)
+                    2. Server-computed spatial.directionsPath (from RouteOptimization)
+                    3. Straight-line fallback through the explicit waypoints
+                */}
                 <RoutePolyline
                   points={
-                    spatial.directionsPath && spatial.directionsPath.length >= 2
-                      ? spatial.directionsPath
-                      : [
-                          { lat: spatial.origin.lat, lng: spatial.origin.lng },
-                          ...spatial.waypoints.map(wp => ({ lat: wp.lat, lng: wp.lng }))
-                        ]
+                    clientPath && clientPath.length >= 2
+                      ? clientPath
+                      : spatial.directionsPath && spatial.directionsPath.length >= 2
+                        ? spatial.directionsPath
+                        : [
+                            { lat: spatial.origin.lat, lng: spatial.origin.lng },
+                            ...spatial.waypoints.map(wp => ({ lat: wp.lat, lng: wp.lng }))
+                          ]
                   }
                 />
               </Map>

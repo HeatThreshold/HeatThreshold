@@ -416,11 +416,21 @@ interface DirectionsResult {
  * by geographic proximity. Origin and destination are pinned and never
  * reordered.
  */
+function travelModeForActivity(activity: string): 'bicycling' | 'walking' | 'driving' {
+  const a = activity.toLowerCase();
+  if (/bik(e|ing)|cycl(e|ing)|pedal/.test(a)) return 'bicycling';
+  if (/driv(e|ing)|car|truck/.test(a)) return 'driving';
+  // walking covers jogging/running/hiking/strolling — Google Directions
+  // doesn't have a running mode so we use walking paths.
+  return 'walking';
+}
+
 async function fetchGoogleDirections(
   origin: { lat: number; lng: number },
   destination: { lat: number; lng: number },
   middleWaypoints: Array<{ lat: number; lng: number; label?: string }>,
-  refuges: Array<{ lat: number; lng: number; name?: string }> = []
+  refuges: Array<{ lat: number; lng: number; name?: string }> = [],
+  activity: string = ''
 ): Promise<DirectionsResult> {
   const apiKey = process.env.GOOGLE_MAPS_PLATFORM_KEY || '';
   // Original via-point order, indexed for RouteOptimizationSubAgent reporting.
@@ -462,7 +472,8 @@ async function fetchGoogleDirections(
     const waypointsParam = viaPoints.length > 0
       ? `&waypoints=optimize:true|${viaStr}`
       : '';
-    const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin.lat},${origin.lng}&destination=${destination.lat},${destination.lng}${waypointsParam}&mode=walking&key=${apiKey}`;
+    const travelMode = travelModeForActivity(activity);
+    const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin.lat},${origin.lng}&destination=${destination.lat},${destination.lng}${waypointsParam}&mode=${travelMode}&key=${apiKey}`;
 
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP status ${res.status}`);
@@ -950,16 +961,17 @@ export async function runOrchestrationGraph(
     const waypointMiddles = waypoints.slice(0, -1).map(w => ({ lat: w.lat, lng: w.lng, label: w.label }));
     const refugeViaPoints = synthesis.coolingStops.map(s => ({ lat: s.lat, lng: s.lng, name: s.name }));
 
+    const travelMode = travelModeForActivity(activity);
     const { path: directionsPath, steps: directionSteps, usedLive, optimizedOrder, reorderedFromOriginal } = await recorder.withSpan(
       'RouteDirectionsSubAgent',
       {
         tool: 'google-maps-directions',
-        mode: 'walking',
+        mode: travelMode,
         viaPoints: waypointMiddles.length + refugeViaPoints.length,
         optimize: 'true'
       },
-      () => fetchGoogleDirections(origin, dest, waypointMiddles, refugeViaPoints),
-      r => `live=${r.usedLive} polyline=${r.path.length}pts steps=${r.steps.length} reordered=${r.reorderedFromOriginal}`
+      () => fetchGoogleDirections(origin, dest, waypointMiddles, refugeViaPoints, activity),
+      r => `live=${r.usedLive} mode=${travelMode} polyline=${r.path.length}pts steps=${r.steps.length} reordered=${r.reorderedFromOriginal}`
     );
     synthesis.spatial.directionsPath = directionsPath;
 
