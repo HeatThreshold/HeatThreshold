@@ -17,10 +17,12 @@
           "troika-worker-utils": "https://cdn.jsdelivr.net/gh/protectwise/troika@v0.52.4/packages/troika-worker-utils/src/index.js",
           "bidi-js": "https://esm.sh/bidi-js@%5E1.0.2?target=es2022",
           "webgl-sdf-generator": "https://esm.sh/webgl-sdf-generator@1.1.1/es2022/webgl-sdf-generator.mjs",
-          "lit": "https://cdn.jsdelivr.net/npm/lit@3/core/lit-core.min.js",
+          "lit": "https://esm.run/lit@3",
           "lit/": "https://esm.run/lit@3/",
           "xrblocks": "https://cdn.jsdelivr.net/npm/xrblocks@0.14.1/build/xrblocks.js",
-          "xrblocks/addons/": "https://cdn.jsdelivr.net/npm/xrblocks@0.14.1/build/addons/"
+          "xrblocks/addons/": "https://cdn.jsdelivr.net/npm/xrblocks@0.14.1/build/addons/",
+          "3d-tiles-renderer": "https://esm.run/3d-tiles-renderer@0.4.25",
+          "3d-tiles-renderer/plugins": "https://esm.run/3d-tiles-renderer@0.4.25/plugins"
         }
       }
     </script>
@@ -30,6 +32,8 @@
       import 'xrblocks/addons/simulator/SimulatorAddons.js';
       import * as THREE from 'three';
       import * as xb from 'xrblocks';
+      import { TilesRenderer } from '3d-tiles-renderer';
+      import { GoogleCloudAuthPlugin, ReorientationPlugin, TileCompressionPlugin, TilesFadePlugin } from '3d-tiles-renderer/plugins';
 
       // -- Parse plan query params --------------------------------------------------------------
       const urlParams = new URLSearchParams(window.location.search);
@@ -39,6 +43,7 @@
       let wetBulb = parseFloat(urlParams.get('wetBulb') || '72');
       let flagRule = urlParams.get('flag') || 'white';
       const watchMode = urlParams.get('watch') === '1';
+      const gmpKey = urlParams.get('gmpKey') || '';
 
       let spatialData = { origin: null, waypoints: [], headingNote: 'None', directionsPath: [], navigationArrows: [], sunSamples: [] };
       try {
@@ -102,6 +107,8 @@
           this.routeGroup = new THREE.Group();
           this.add(this.routeGroup);
 
+          this.buildWebcamBackground();
+          this.buildFloor();
           this.buildSpatialCoordinates();
           this.buildShadeOverlay();
           this.buildGroundArrows();
@@ -118,6 +125,182 @@
             if (!d || d.kind !== 'heat-threshold/live-tick') return;
             this.applyLiveTick(d);
           });
+        }
+
+        // ------------------------------------------------------------------------------------
+        // Webcam-as-background — desktop preview shows the user's real environment.
+        // In AR sessions the device handles passthrough natively, so we hide the plane
+        // once a session starts (via sessionstart/sessionend events on the THREE.WebXRManager).
+        // ------------------------------------------------------------------------------------
+        async buildWebcamBackground() {
+          if (!navigator.mediaDevices?.getUserMedia) return;
+          let stream;
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: { facingMode: 'environment' },
+              audio: false
+            });
+          } catch (err) {
+            console.warn('[XR] Webcam unavailable, keeping default backdrop:', err.message);
+            return;
+          }
+
+          const video = document.createElement('video');
+          video.srcObject = stream;
+          video.muted = true;
+          video.playsInline = true;
+          video.autoplay = true;
+          try { await video.play(); } catch (e) { /* will play on first frame */ }
+
+          const texture = new THREE.VideoTexture(video);
+          texture.colorSpace = THREE.SRGBColorSpace;
+
+          // Large plane far behind the scene, oriented to face the camera.
+          // Sized to cover a wide FOV from the user's resting head position.
+          const plane = new THREE.Mesh(
+            new THREE.PlaneGeometry(40, 24),
+            new THREE.MeshBasicMaterial({ map: texture, depthWrite: false, side: THREE.DoubleSide })
+          );
+          plane.position.set(0, 1.5, -8);
+          plane.renderOrder = -1000;
+          this.bgPlane = plane;
+          this.add(plane);
+
+          // Hide the webcam plane during AR sessions so device passthrough is unobscured.
+          const renderer = xb.core?.renderer || xb.core?.scene?.renderer || xb.renderer;
+          if (renderer?.xr?.addEventListener) {
+            renderer.xr.addEventListener('sessionstart', () => { plane.visible = false; });
+            renderer.xr.addEventListener('sessionend', () => { plane.visible = true; });
+          }
+        }
+
+        // ------------------------------------------------------------------------------------
+        // Floor-anchored Google Static Maps satellite tile with the route polyline burned in.
+        // Sits like a coffee-table map ~1.2m in front of the user.
+        // ------------------------------------------------------------------------------------
+        buildFloorMap() {
+          if (!gmpKey || !spatialData.origin) return;
+
+          const allPts = [
+            { lat: spatialData.origin.lat, lng: spatialData.origin.lng },
+            ...(spatialData.waypoints || []).map(w => ({ lat: w.lat, lng: w.lng })),
+            ...coolingStops.map(s => ({ lat: s.lat, lng: s.lng }))
+          ];
+          if (allPts.length === 0) return;
+
+          const pathStr = allPts.map(p => `${p.lat},${p.lng}`).join('|');
+          const originMarker = `markers=color:blue%7Clabel:O%7C${spatialData.origin.lat},${spatialData.origin.lng}`;
+          const wpMarkers = (spatialData.waypoints || [])
+            .map((w, i) => `markers=color:red%7Clabel:${i + 1}%7C${w.lat},${w.lng}`)
+            .join('&');
+          const stopMarkers = coolingStops
+            .map(s => `markers=color:green%7Clabel:C%7C${s.lat},${s.lng}`)
+            .join('&');
+
+          const params = [
+            `size=640x640`,
+            `scale=2`,
+            `maptype=satellite`,
+            `path=color:0x6366f1ff%7Cweight:5%7C${encodeURIComponent(pathStr)}`,
+            originMarker,
+            wpMarkers,
+            stopMarkers,
+            `key=${encodeURIComponent(gmpKey)}`
+          ].filter(Boolean).join('&');
+
+          const url = `https://maps.googleapis.com/maps/api/staticmap?${params}`;
+
+          new THREE.TextureLoader().load(
+            url,
+            (texture) => {
+              texture.colorSpace = THREE.SRGBColorSpace;
+              const mapPlane = new THREE.Mesh(
+                new THREE.PlaneGeometry(1.6, 1.6),
+                new THREE.MeshBasicMaterial({ map: texture, transparent: true, opacity: 0.95, side: THREE.DoubleSide })
+              );
+              // Lay flat on the floor, 1.2m in front of the user, just above ground.
+              mapPlane.rotation.x = -Math.PI / 2;
+              mapPlane.position.set(0, 0.02, -1.2);
+              this.add(mapPlane);
+              this.floorMap = mapPlane;
+            },
+            undefined,
+            (err) => console.warn('[XR] Floor map failed to load:', err)
+          );
+        }
+
+        // ------------------------------------------------------------------------------------
+        // Floor dispatcher — try Photorealistic 3D Tiles first; fall back to flat satellite
+        // if construction fails (network, Map Tiles API not enabled, etc.) or if the user
+        // explicitly requested flat via ?tiles=flat.
+        // ------------------------------------------------------------------------------------
+        buildFloor() {
+          if (urlParams.get('tiles') === 'flat') {
+            this.buildFloorMap();
+            return;
+          }
+          try {
+            this.build3DTilesFloor();
+          } catch (err) {
+            console.warn('[XR] 3D Tiles init failed, falling back to flat satellite:', err);
+            this.buildFloorMap();
+          }
+        }
+
+        // ------------------------------------------------------------------------------------
+        // Photorealistic 3D Tiles floor — Google's Map Tiles API rendered as a floor table.
+        // Needs:
+        //   - gmpKey URL param with Map Tiles API enabled in the GCP project
+        //   - xb.core.camera + xb.core.renderer (set by xrblocks after init)
+        // Tile geometry arrives at Earth scale; we scale tiles.group down ~1000× so ~1km of
+        // terrain occupies ~1m on the floor.
+        // ------------------------------------------------------------------------------------
+        build3DTilesFloor() {
+          if (!gmpKey || !spatialData.origin) return;
+
+          const latRad = spatialData.origin.lat * THREE.MathUtils.DEG2RAD;
+          const lonRad = spatialData.origin.lng * THREE.MathUtils.DEG2RAD;
+
+          const tiles = new TilesRenderer();
+          tiles.registerPlugin(new GoogleCloudAuthPlugin({ apiToken: gmpKey, autoRefreshToken: true }));
+          tiles.registerPlugin(new ReorientationPlugin({ lat: latRad, lon: lonRad }));
+          tiles.registerPlugin(new TileCompressionPlugin());
+          tiles.registerPlugin(new TilesFadePlugin());
+
+          // Tighten LOD so the small-on-floor render still pulls reasonable tile detail.
+          tiles.errorTarget = 12;
+
+          // Anchor the tile group on the floor, in front of the user, sized like a coffee table.
+          const group = tiles.group;
+          group.scale.setScalar(0.001);
+          group.position.set(0, 0.02, -1.2);
+          this.add(group);
+
+          // Warn (don't throw) when downloads fail so flat fallback isn't triggered for
+          // transient network blips.
+          tiles.addEventListener?.('load-error', (e) => console.warn('[XR] tile load error:', e));
+
+          this.tiles3D = tiles;
+        }
+
+        // ------------------------------------------------------------------------------------
+        // Dispose the current floor representation and rebuild from current spatialData.
+        // Called by applyLiveTick when the live watch carries new spatial data.
+        // ------------------------------------------------------------------------------------
+        rebuildFloorMap() {
+          if (this.floorMap) {
+            this.remove(this.floorMap);
+            this.floorMap.material.map?.dispose();
+            this.floorMap.material.dispose();
+            this.floorMap.geometry.dispose();
+            this.floorMap = null;
+          }
+          if (this.tiles3D) {
+            this.remove(this.tiles3D.group);
+            this.tiles3D.dispose?.();
+            this.tiles3D = null;
+          }
+          this.buildFloor();
         }
 
         // ------------------------------------------------------------------------------------
@@ -458,6 +641,13 @@
           reasoning = tick.reasoning ?? reasoning;
           flagInfo = flagColors[flagRule] || flagColors.white;
 
+          // If the tick carries fresh route data, refresh the floor map from the new bbox.
+          // Today's runWatchTick doesn't include spatial — the hook is here for when it does.
+          if (tick.spatial) {
+            spatialData = { ...spatialData, ...tick.spatial };
+            this.rebuildFloorMap();
+          }
+
           if (this.ratingText?.setText) {
             this.ratingText.setText(`Peak WBGT: ${wetBulb}°F (${flagRule.toUpperCase()} Flag Rated) · LIVE`);
           }
@@ -545,6 +735,15 @@
         update() {
           this.animationTime += xb.getDeltaTime();
           this.routeGroup.rotation.y = 0.05 * Math.sin(this.animationTime * 0.2);
+
+          // Drive Photorealistic 3D Tiles loading + LOD selection. Camera/renderer are
+          // populated by xrblocks shortly after init, so we re-check each frame.
+          if (this.tiles3D && xb.core?.camera && xb.core?.renderer) {
+            this.tiles3D.setCamera(xb.core.camera);
+            this.tiles3D.setResolutionFromRenderer(xb.core.camera, xb.core.renderer);
+            xb.core.camera.updateMatrixWorld();
+            this.tiles3D.update();
+          }
 
           // Pulse route node rings
           const scale = 1.0 + 0.15 * Math.sin(this.animationTime * 3.0);

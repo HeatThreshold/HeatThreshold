@@ -10,3 +10,4 @@ coverage/
 .vercel/
 mcp-traces/*-mcp.jsonl
 mcp-traces/*-mcp-server.jsonl
+.vercel
