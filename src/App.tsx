@@ -57,6 +57,7 @@ function Dashboard() {
   const [selectedPreset, setSelectedPreset] = useState<string>('sf-route');
   
   const [isXrModalOpen, setIsXrModalOpen] = useState(false);
+  const [xrMode, setXrMode] = useState<'static' | 'preview' | 'live'>('static');
   const [timeState, setTimeState] = useState('11:06 AM PDT');
   const [dateState, setDateState] = useState('May 23, 2026');
   const [hoveredHourIndex, setHoveredHourIndex] = useState<number | null>(null);
@@ -954,21 +955,38 @@ function Dashboard() {
             </div>
           </section>
 
-          {/* Final Actions / XR Interactive Visualizer Card - Slate Styled to maintain beautiful monochromatic layout */}
-          <section className="col-span-1 md:col-span-3 md:row-span-2 bg-[#202124] border border-zinc-800 rounded-2xl p-6 flex flex-col justify-between text-white hover:bg-black transition-all duration-300 shadow-xl">
+          {/* Final Actions / XR Interactive Visualizer Card */}
+          <section className="col-span-1 md:col-span-3 md:row-span-2 bg-[#202124] border border-zinc-800 rounded-2xl p-5 flex flex-col justify-between text-white hover:bg-black transition-all duration-300 shadow-xl">
             <div className="space-y-1">
               <h2 className="text-[10px] font-bold uppercase tracking-widest text-zinc-400 font-mono">AR/XR Spatial Telemetry</h2>
-              <p className="text-xs text-zinc-300 font-medium leading-relaxed">
-                Step directly into the environmental scheduling coordinates inside spatial reality. Works with mobile sensors.
+              <p className="text-[11px] text-zinc-300 font-medium leading-relaxed">
+                Three ways to step into the route. Each opens the WebXR spatial HUD in a different mode.
               </p>
             </div>
-            
-            <button 
-              onClick={() => setIsXrModalOpen(true)}
-              className="w-full py-2.5 bg-[#1a73e8] hover:bg-[#1557b0] text-white rounded-xl font-bold uppercase tracking-widest text-xs transition-colors shadow-lg flex items-center justify-center gap-1.5 active:translate-y-[1px] cursor-pointer border border-[#1a73e8]"
-            >
-              <ExternalLink className="w-3.5 h-3.5" /> Launch spatial xr 3D
-            </button>
+
+            <div className="space-y-2 mt-3">
+              <button
+                onClick={() => { setXrMode('preview'); setIsXrModalOpen(true); }}
+                className="w-full py-2.5 bg-[#fbbc05] hover:bg-[#d99e00] text-[#202124] rounded-xl font-bold uppercase tracking-wider text-[11px] transition-colors shadow-lg flex items-center justify-center gap-1.5 active:translate-y-[1px] cursor-pointer border border-[#fbbc05]"
+                title="Cinematic fly-through of every waypoint and refuge — perfect for the demo"
+              >
+                <Sparkles className="w-3.5 h-3.5" /> Cinematic Preview
+              </button>
+              <button
+                onClick={() => { setXrMode('live'); setIsXrModalOpen(true); }}
+                className="w-full py-2.5 bg-[#ea4335] hover:bg-[#c5221f] text-white rounded-xl font-bold uppercase tracking-wider text-[11px] transition-colors shadow-lg flex items-center justify-center gap-1.5 active:translate-y-[1px] cursor-pointer border border-[#ea4335]"
+                title="Drops a pulsing 'you are here' beacon at your GPS location and tracks distance to the next refuge"
+              >
+                <Radio className="w-3.5 h-3.5" /> Live Activity Mode
+              </button>
+              <button
+                onClick={() => { setXrMode('static'); setIsXrModalOpen(true); }}
+                className="w-full py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl font-bold uppercase tracking-wider text-[11px] transition-colors flex items-center justify-center gap-1.5 active:translate-y-[1px] cursor-pointer border border-zinc-700"
+                title="Static spatial HUD — interact with nodes manually"
+              >
+                <ExternalLink className="w-3.5 h-3.5" /> Static Spatial HUD
+              </button>
+            </div>
           </section>
 
         </div>
@@ -1012,15 +1030,26 @@ function Dashboard() {
           <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-5xl w-full p-6 text-white shadow-2xl relative">
             <h2 className="text-lg font-black tracking-tight uppercase flex items-center gap-2 text-blue-400 mb-1">
               🚀 Spatial XR Environmental Timeline HUD
+              <span className={`ml-2 px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase tracking-widest border ${
+                xrMode === 'preview' ? 'bg-[#fbbc05]/15 border-[#fbbc05]/55 text-[#fbbc05]' :
+                xrMode === 'live'    ? 'bg-[#ea4335]/15 border-[#ea4335]/55 text-[#ea4335]' :
+                                       'bg-zinc-800 border-zinc-700 text-zinc-300'
+              }`}>
+                {xrMode === 'preview' ? '◆ Cinematic Preview' : xrMode === 'live' ? '● Live Activity' : 'Static'}
+              </span>
             </h2>
             <p className="text-[10px] font-mono tracking-wide text-indigo-300 uppercase mb-4 border-b border-slate-850 pb-2">
-              Waypoint projections & safety indices mapped in 3D relative to: {currentPlan.spatial.origin.label}
+              {xrMode === 'preview'
+                ? `Cinematic fly-through of every waypoint + refuge on: ${currentPlan.spatial.origin.label}`
+                : xrMode === 'live'
+                  ? `Geolocation-tracked beacon. Grant GPS permission and stand on the route.`
+                  : `Waypoint projections & safety indices mapped in 3D relative to: ${currentPlan.spatial.origin.label}`}
             </p>
 
             {/* Real 3D WebXR and Simulator Experience */}
             <iframe
               ref={xrIframeRef}
-              src={`/xr.html?verdict=${encodeURIComponent(currentPlan.verdict)}&headline=${encodeURIComponent(currentPlan.headline)}&reasoning=${encodeURIComponent(currentPlan.reasoning)}&wetBulb=${currentPlan.wetBulbPeakF}&flag=${currentPlan.flag}&spatial=${encodeURIComponent(JSON.stringify(currentPlan.spatial))}&stops=${encodeURIComponent(JSON.stringify(currentPlan.coolingStops))}&breaks=${encodeURIComponent(JSON.stringify(currentPlan.suggestedBreaks || []))}&watch=${isWatching ? '1' : '0'}&gmpKey=${encodeURIComponent(process.env.GOOGLE_MAPS_PLATFORM_KEY || '')}`}
+              src={`/xr.html?mode=${xrMode}&verdict=${encodeURIComponent(currentPlan.verdict)}&headline=${encodeURIComponent(currentPlan.headline)}&reasoning=${encodeURIComponent(currentPlan.reasoning)}&wetBulb=${currentPlan.wetBulbPeakF}&flag=${currentPlan.flag}&spatial=${encodeURIComponent(JSON.stringify(currentPlan.spatial))}&stops=${encodeURIComponent(JSON.stringify(currentPlan.coolingStops))}&breaks=${encodeURIComponent(JSON.stringify(currentPlan.suggestedBreaks || []))}&watch=${isWatching ? '1' : '0'}&gmpKey=${encodeURIComponent(process.env.GOOGLE_MAPS_PLATFORM_KEY || '')}`}
               className="w-full h-96 md:h-[500px] border border-slate-800 rounded-xl bg-slate-950 mb-4 shadow-inner"
               title="Spatial XR Immersive Timeline HUD"
               allow="camera; microphone; geolocation"

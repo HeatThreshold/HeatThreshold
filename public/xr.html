@@ -80,6 +80,13 @@
       let flagRule = urlParams.get('flag') || 'white';
       const watchMode = urlParams.get('watch') === '1';
       const gmpKey = urlParams.get('gmpKey') || '';
+      // Experience mode: 'static' (default — just rotate gently),
+      //                  'preview' (cinematic fly-through that highlights each
+      //                             node in sequence; impressive demo beat),
+      //                  'live'    (geolocation-driven "you are here" beacon).
+      const xrMode = urlParams.get('mode') === 'preview' || urlParams.get('mode') === 'live'
+        ? urlParams.get('mode')
+        : 'static';
 
       let spatialData = { origin: null, waypoints: [], headingNote: 'None', directionsPath: [], navigationArrows: [], sunSamples: [] };
       try {
@@ -155,12 +162,223 @@
 
           this.animationTime = 0;
 
+          // Experience-mode state ------------------------------------------------
+          // Preview mode: cycles through every interesting node every PREVIEW_CADENCE_S
+          // seconds, scaling it up + showing a banner label. Pure visual; no nav.
+          // Live mode: drops a pulsing "you are here" beacon at the user's GPS
+          // location, projected into the route's local coordinate frame.
+          this.previewIndex = 0;
+          this.previewNextSwitchAt = 0;
+          this.previewHighlightNode = null;
+          this.previewCycleSecs = 3.0;
+          this.liveBeacon = null;
+          this.liveAccuracy = null;
+
+          this.initExperienceMode();
+
           // Listen for live ticks from the host page.
           window.addEventListener('message', e => {
             const d = e?.data;
             if (!d || d.kind !== 'heat-threshold/live-tick') return;
             this.applyLiveTick(d);
           });
+        }
+
+        // ------------------------------------------------------------------------------------
+        // Experience-mode bootstrap. Static is the default (gentle auto-rotate);
+        // 'preview' kicks off a cinematic cycle; 'live' requests geolocation.
+        // ------------------------------------------------------------------------------------
+        initExperienceMode() {
+          if (xrMode === 'preview') {
+            this.buildPreviewBanner();
+            // Stop the gentle auto-rotate so the camera/group orientation comes
+            // entirely from the cinematic sequencer.
+            this.routeGroup.rotation.y = 0;
+            return;
+          }
+          if (xrMode === 'live') {
+            this.buildLiveStatusPanel();
+            this.startLiveTracking();
+            return;
+          }
+        }
+
+        // Visible target list used by preview mode — origin, waypoints, refuges, and
+        // break beacons. We resolve from the existing arrays so the cycle reflects
+        // whatever the current spatial data describes.
+        previewTargets() {
+          const targets = [];
+          for (const node of this.routeNodes) {
+            targets.push({
+              mesh: node,
+              label: node.userData.label || node.name,
+              details: node.userData.details || ''
+            });
+          }
+          for (const { orb } of this.breakBeacons) {
+            targets.push({
+              mesh: orb,
+              label: orb.userData.label || 'Break',
+              details: orb.userData.details || ''
+            });
+          }
+          return targets;
+        }
+
+        buildPreviewBanner() {
+          // Float a slim status panel above the route table that announces the
+          // current node in the cycle.
+          this.previewPanel = new xb.SpatialPanel({
+            width: 1.1, height: 0.18, backgroundColor: '#0f172af2', useDefaultPosition: false
+          });
+          const grid = this.previewPanel.addGrid();
+          grid.addRow({ weight: 1 }).addText({
+            text: '◆ CINEMATIC PREVIEW',
+            fontColor: '#fbbc05', fontSize: 0.038, textAlign: 'center'
+          });
+          this.previewBannerText = grid.addRow({ weight: 1 }).addText({
+            text: 'Cycling through every node along the route…',
+            fontColor: '#ffffff', fontSize: 0.03, textAlign: 'center'
+          });
+          this.previewPanel.position.set(0, 1.9, -1.6);
+          this.add(this.previewPanel);
+        }
+
+        tickPreview() {
+          if (this.animationTime < this.previewNextSwitchAt) return;
+          const targets = this.previewTargets();
+          if (targets.length === 0) return;
+
+          // Restore the previously-highlighted mesh
+          if (this.previewHighlightNode) {
+            this.previewHighlightNode.scale.setScalar(1.0);
+            if (this.previewHighlightNode.material?.emissiveIntensity != null) {
+              this.previewHighlightNode.material.emissiveIntensity = 0.25;
+            }
+          }
+
+          const t = targets[this.previewIndex % targets.length];
+          this.previewIndex = (this.previewIndex + 1) % targets.length;
+          this.previewNextSwitchAt = this.animationTime + this.previewCycleSecs;
+
+          // Highlight current target
+          t.mesh.scale.setScalar(1.55);
+          if (t.mesh.material?.emissiveIntensity != null) {
+            t.mesh.material.emissiveIntensity = 0.95;
+          }
+          this.previewHighlightNode = t.mesh;
+
+          // Announce in the panel
+          if (this.previewBannerText?.setText) {
+            this.previewBannerText.setText(`${t.label.toUpperCase()}\n${t.details}`);
+          }
+
+          // Slow camera-orbit: gently rotate the route group so the highlighted
+          // mesh swings toward the viewer (front of the projection, -Z in local).
+          const targetAngle = Math.atan2(t.mesh.position.x, -t.mesh.position.z);
+          // Aim the group's Y rotation so the target ends up at -Z.
+          this.previewTargetGroupY = -targetAngle;
+
+          xb.core.sound.soundSynthesizer.playPresetTone('CLICK', 0.4);
+        }
+
+        // ------------------------------------------------------------------------------------
+        // Live activity mode — geolocation-driven beacon + nearest-break readout
+        // ------------------------------------------------------------------------------------
+        buildLiveStatusPanel() {
+          this.livePanel = new xb.SpatialPanel({
+            width: 1.1, height: 0.22, backgroundColor: '#0f172af2', useDefaultPosition: false
+          });
+          const grid = this.livePanel.addGrid();
+          grid.addRow({ weight: 0.45 }).addText({
+            text: '● LIVE ACTIVITY MODE',
+            fontColor: '#ea4335', fontSize: 0.04, textAlign: 'center'
+          });
+          this.liveStatusText = grid.addRow({ weight: 0.55 }).addText({
+            text: 'Requesting GPS permission…',
+            fontColor: '#ffffff', fontSize: 0.028, textAlign: 'center'
+          });
+          this.livePanel.position.set(0, 1.9, -1.6);
+          this.add(this.livePanel);
+        }
+
+        startLiveTracking() {
+          if (!navigator.geolocation) {
+            this.liveStatusText?.setText?.('Geolocation unavailable on this browser.');
+            return;
+          }
+          const onPosition = (pos) => {
+            const { latitude, longitude, accuracy } = pos.coords;
+            this.placeLiveBeacon(latitude, longitude, accuracy);
+          };
+          const onError = (err) => {
+            this.liveStatusText?.setText?.(`GPS error: ${err.message}. Stand outdoors and reload.`);
+          };
+          navigator.geolocation.getCurrentPosition(onPosition, onError, {
+            enableHighAccuracy: true, timeout: 8000, maximumAge: 0
+          });
+          this.liveWatchId = navigator.geolocation.watchPosition(onPosition, onError, {
+            enableHighAccuracy: true, timeout: 12000, maximumAge: 4000
+          });
+        }
+
+        placeLiveBeacon(lat, lng, accuracyM) {
+          if (!projector) return;
+          // Project the user's GPS into the routeGroup local frame.
+          const pos = (function () {
+            const dx = (lng - projector.lng0) * projector.lngToX;
+            const dz = (lat - projector.lat0) * projector.latToZ;
+            return new THREE.Vector3(
+              (dx - projector.centerX) * projector.scale,
+              0,
+              (dz - projector.centerZ) * projector.scale
+            );
+          })();
+
+          if (!this.liveBeacon) {
+            const orb = new THREE.Mesh(
+              new THREE.SphereGeometry(0.05, 24, 12),
+              new THREE.MeshPhongMaterial({
+                color: 0xea4335, emissive: 0xea4335,
+                emissiveIntensity: 0.85, transparent: true, opacity: 0.95
+              })
+            );
+            const ring = new THREE.Mesh(
+              new THREE.RingGeometry(0.07, 0.085, 24),
+              new THREE.MeshBasicMaterial({ color: 0xea4335, side: THREE.DoubleSide, transparent: true, opacity: 0.6 })
+            );
+            ring.rotation.x = -Math.PI / 2;
+            this.routeGroup.add(orb);
+            this.routeGroup.add(ring);
+            this.liveBeacon = { orb, ring };
+          }
+          this.liveBeacon.orb.position.copy(pos).setY(0.06);
+          this.liveBeacon.ring.position.copy(pos).setY(0.01);
+
+          // Find nearest break (or refuge) for the readout
+          const all = [];
+          for (const { orb, breakSpec } of this.breakBeacons) {
+            all.push({ pos: orb.position, label: orb.userData.label, kind: 'break', spec: breakSpec });
+          }
+          for (const node of this.routeNodes) {
+            if (node.userData.type === 'coolingStop') {
+              all.push({ pos: node.position, label: node.userData.label, kind: 'refuge' });
+            }
+          }
+          let best = null;
+          let bestD = Infinity;
+          for (const a of all) {
+            const d = pos.distanceTo(a.pos);
+            if (d < bestD) { bestD = d; best = a; }
+          }
+          // Distance is in local scene units (~1 unit ≈ maxSpan meters of the
+          // original projection). We don't have the inverse — approximate by
+          // showing local distance + GPS accuracy so the user has a feel.
+          const approxMeters = Math.round(bestD * 1000);
+          const msg = best
+            ? `Next refuge: ${best.label}\n~${approxMeters}m on map (GPS ±${Math.round(accuracyM)}m)`
+            : `GPS locked (±${Math.round(accuracyM)}m). No refuges loaded.`;
+          this.liveStatusText?.setText?.(msg);
         }
 
         // ------------------------------------------------------------------------------------
@@ -770,7 +988,28 @@
 
         update() {
           this.animationTime += xb.getDeltaTime();
-          this.routeGroup.rotation.y = 0.05 * Math.sin(this.animationTime * 0.2);
+
+          // Mode-aware camera/group rotation:
+          //   - static: gentle sway (original behavior)
+          //   - preview: ease toward the highlighted target's angle
+          //   - live: hold the group level so the GPS beacon stays oriented north
+          if (xrMode === 'preview') {
+            this.tickPreview();
+            if (this.previewTargetGroupY != null) {
+              const cur = this.routeGroup.rotation.y;
+              this.routeGroup.rotation.y = cur + (this.previewTargetGroupY - cur) * 0.04;
+            }
+          } else if (xrMode === 'live') {
+            // Hold north-up. Pulse the live beacon if present.
+            this.routeGroup.rotation.y = 0;
+            if (this.liveBeacon) {
+              const pulse = 1.0 + 0.25 * Math.sin(this.animationTime * 4.0);
+              this.liveBeacon.orb.scale.setScalar(pulse);
+              this.liveBeacon.ring.scale.setScalar(pulse * 1.15);
+            }
+          } else {
+            this.routeGroup.rotation.y = 0.05 * Math.sin(this.animationTime * 0.2);
+          }
 
           // Drive Photorealistic 3D Tiles loading + LOD selection. Camera/renderer are
           // populated by xrblocks shortly after init, so we re-check each frame.
