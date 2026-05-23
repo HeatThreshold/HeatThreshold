@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+.antigravitycli/
+mcp-traces/*-mcp.jsonl
+mcp-traces/*-mcp-server.jsonl
