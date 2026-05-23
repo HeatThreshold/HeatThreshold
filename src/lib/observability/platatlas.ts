@@ -27,7 +27,6 @@ export interface PlatAtlasSpan {
 export class PlatAtlasRecorder {
   readonly runId: string;
   private root: PlatAtlasSpan;
-  private currentStack: PlatAtlasSpan[] = [];
 
   constructor(runId?: string) {
     this.runId = runId || randomUUID();
@@ -42,12 +41,13 @@ export class PlatAtlasRecorder {
       attributes: { runId: this.runId },
       children: []
     };
-    this.currentStack.push(this.root);
   }
 
   /**
-   * Records a child span. The async work is the second argument; PlatAtlas
-   * times it, captures status, and appends a span to the active parent.
+   * Records a child span attached to the PrimaryAgent root. Safe to call
+   * concurrently — every span knows its parent at call time, so Promise.all
+   * fan-out for parallel sub-agents (Weather + Place) doesn't corrupt the
+   * tree shape.
    */
   async withSpan<T>(
     name: string,
@@ -55,10 +55,9 @@ export class PlatAtlasRecorder {
     work: () => Promise<T>,
     summarize?: (value: T) => string
   ): Promise<T> {
-    const parent = this.currentStack[this.currentStack.length - 1];
     const span: PlatAtlasSpan = {
       spanId: randomUUID(),
-      parentSpanId: parent.spanId,
+      parentSpanId: this.root.spanId,
       name,
       startedAt: new Date().toISOString(),
       endedAt: null,
@@ -67,8 +66,7 @@ export class PlatAtlasRecorder {
       attributes,
       children: []
     };
-    parent.children.push(span);
-    this.currentStack.push(span);
+    this.root.children.push(span);
 
     const startedNs = Date.now();
     try {
@@ -86,8 +84,6 @@ export class PlatAtlasRecorder {
       span.status = 'failed';
       span.error = err?.message || String(err);
       throw err;
-    } finally {
-      this.currentStack.pop();
     }
   }
 

@@ -348,7 +348,7 @@ function Dashboard() {
             <div className="w-9 h-9 bg-[#202124] text-white rounded-xl flex items-center justify-center font-black text-base uppercase tracking-tighter shadow-md">HT</div>
             <div>
               <h1 className="text-lg font-black tracking-tight uppercase flex items-center gap-2 text-slate-900">
-                Heat Threshold <span className="text-[#1a73e8] font-normal normal-case text-xs tracking-nowrap bg-[#e8f0fe] text-[#1a73e8] px-2.5 py-0.5 rounded-lg font-mono font-bold border border-[#aecbfa]">Live Google Grounded Plan V3.5</span>
+                Heat Threshold <span className="text-[#1a73e8] font-normal normal-case text-xs tracking-nowrap bg-[#e8f0fe] text-[#1a73e8] px-2.5 py-0.5 rounded-lg font-mono font-bold border border-[#aecbfa]">Gemini 3.5 Flash · Managed Agents</span>
               </h1>
               <p className="text-[10px] text-slate-500 font-bold tracking-wide uppercase">- Environmental Logistics Scheduler & Safety Guide -</p>
             </div>

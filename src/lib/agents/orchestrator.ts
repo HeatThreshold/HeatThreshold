@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { Type } from '@google/genai';
 import {
   PlanResult,
   PlanOutput,
@@ -11,29 +11,11 @@ import { getHourlyForecasts, getLastWeatherSource } from '../weatherService';
 import { getFlagForWetBulb } from '../flags';
 import { PlatAtlasRecorder } from '../observability/platatlas';
 import { recordRun } from '../observability/mcptape';
-
-// Lazy-loaded Gemini client safely avoiding crashes on module load
-let aiClientInstance: GoogleGenAI | null = null;
-
-function getGeminiClient(): GoogleGenAI {
-  if (aiClientInstance) return aiClientInstance;
-
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY environment variable is not defined. Please add it to your Secrets under Settings.');
-  }
-
-  aiClientInstance = new GoogleGenAI({
-    apiKey: apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
-
-  return aiClientInstance;
-}
+import {
+  ensureAgent,
+  runAgentInteraction,
+  SUBAGENT_SPECS
+} from './managedAgents';
 
 interface GeocodedLocation {
   lat: number;
@@ -43,59 +25,58 @@ interface GeocodedLocation {
 }
 
 /**
- * Resolves standard coordinate parameters for a location string using the LLM.
+ * LocationResolutionSubAgent — invokes the managed agent
+ * `threshold-location-subagent` (see SUBAGENT_SPECS.location). Returns the
+ * geocoded center, 1-3 waypoints, and a resolved label.
  */
 async function resolveLocationWithAI(
   location: string,
   activity: string
 ): Promise<{ data: GeocodedLocation; durationMs: number }> {
   const startTime = Date.now();
-  const ai = getGeminiClient();
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-3.5-flash',
-    contents: `Resolve the physical GPS latitude and longitude coordinates for this travel scheduling request.
+  const agentId = await ensureAgent(SUBAGENT_SPECS.location);
+  const result = await runAgentInteraction({
+    agentId,
+    inputText: `Resolve coordinates for this travel scheduling request.
 Location String: "${location}"
 Reflected Activity: "${activity}"
 
-Provide the geocoded central point, a short list of 1-3 prominent geographic waypoints for the route (if it is a route or trail, otherwise pinpoint key local coordinates), and a clean resolved human-friendly location string.
-
-Respond strictly in JSON format.`,
-    config: {
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          lat: { type: Type.NUMBER, description: 'GPS central latitude' },
-          lng: { type: Type.NUMBER, description: 'GPS central longitude' },
-          resolvedLabel: { type: Type.STRING, description: 'Polished human label' },
-          waypoints: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                lat: { type: Type.NUMBER },
-                lng: { type: Type.NUMBER },
-                label: { type: Type.STRING }
-              },
-              required: ['lat', 'lng', 'label']
+Provide the geocoded central point, a list of 1-3 waypoints, and a clean resolved human-friendly location string.`,
+    responseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        lat: { type: Type.NUMBER, description: 'GPS central latitude' },
+        lng: { type: Type.NUMBER, description: 'GPS central longitude' },
+        resolvedLabel: { type: Type.STRING, description: 'Polished human label' },
+        waypoints: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              lat: { type: Type.NUMBER },
+              lng: { type: Type.NUMBER },
+              label: { type: Type.STRING }
             },
-            description: '1 to 3 relevant logical stops or trail points'
-          }
-        },
-        required: ['lat', 'lng', 'resolvedLabel', 'waypoints']
-      }
+            required: ['lat', 'lng', 'label']
+          },
+          description: '1 to 3 relevant logical stops or trail points'
+        }
+      },
+      required: ['lat', 'lng', 'resolvedLabel', 'waypoints']
     }
   });
 
   const durationMs = Date.now() - startTime;
-  const text = response.text || '{}';
-  const data = JSON.parse(text) as GeocodedLocation;
+  const data = JSON.parse(result.text || '{}') as GeocodedLocation;
   return { data, durationMs };
 }
 
 /**
- * Finds interesting places near coordinates matching localized physical rest zones or shelters.
+ * PlaceSubAgent — invokes the managed agent `threshold-place-subagent`
+ * (see SUBAGENT_SPECS.place) with per-interaction Google Maps grounding
+ * pinned to the supplied lat/lng. Maps grounding is passed as a
+ * per-interaction tool because the Managed Agents `Agent.tools` enum at
+ * v2.4 does not include `google_maps` directly.
  */
 async function getCoolingStopsWithAI(
   lat: number,
@@ -104,16 +85,13 @@ async function getCoolingStopsWithAI(
   activity: string
 ): Promise<{ data: any[]; groundingChunks: any[]; durationMs: number }> {
   const startTime = Date.now();
-  const ai = getGeminiClient();
+  const agentId = await ensureAgent(SUBAGENT_SPECS.place);
 
-  // Maps grounding is enabled by placing {googleMaps: {}} inside the tools list
-  // Note: responseMimeType and responseSchema are NOT allowed when using googleMaps
-  const response = await ai.models.generateContent({
-    model: 'gemini-3.5-flash',
-    contents: `Identify 3 genuine places near "${resolvedLabel}" (specifically around central GPS coordinates: ${lat}, ${lng}) that exist on Google Maps and serve as excellent outdoor/trail rest points, shaded spots, parks, local water fountains, cafes, or shelters for this activity: "${activity}".
-Do NOT include medical centers. Speak of shade, heat shelter, and access to hydration.
+  const result = await runAgentInteraction({
+    agentId,
+    inputText: `Identify 3 genuine places near "${resolvedLabel}" (around central GPS coordinates: ${lat}, ${lng}) that exist on Google Maps and serve as outdoor/trail rest points, shaded spots, parks, water fountains, cafes, or shelters for: "${activity}".
 
-Output exactly a JSON block in the following structure inside your markdown text reply:
+Output exactly one JSON block inside your markdown reply:
 \`\`\`json
 {
   "stops": [
@@ -123,26 +101,21 @@ Output exactly a JSON block in the following structure inside your markdown text
       "lat": ${lat},
       "lng": ${lng},
       "distanceMeters": 350,
-      "why": "Detailed reason why this place serves as a great hydration or thermal protection spot"
+      "why": "Why this is a good environmental refuge"
     }
   ]
 }
 \`\`\``,
-    config: {
-      tools: [{ googleMaps: {} }],
-      toolConfig: {
-        retrievalConfig: {
-          latLng: {
-            latitude: lat,
-            longitude: lng
-          }
-        }
+    perInteractionTools: [{ googleMaps: {} }],
+    toolConfig: {
+      retrievalConfig: {
+        latLng: { latitude: lat, longitude: lng }
       }
     }
   });
 
   const durationMs = Date.now() - startTime;
-  const text = response.text || '';
+  const text = result.text || '';
 
   let stops: any[] = [];
   try {
@@ -171,8 +144,13 @@ Output exactly a JSON block in the following structure inside your markdown text
     ];
   }
 
-  // Extract maps grounding chunks explicitly as required by guidelines
-  const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+  // Grounding chunks from the managed-agents interaction. Falls back to the
+  // raw candidate-shape path for environments where the SDK normalizes the
+  // interaction into a generateContent-style envelope.
+  const groundingChunks: any[] = [
+    ...result.groundingChunks,
+    ...(((result.raw as any)?.candidates?.[0]?.groundingMetadata?.groundingChunks) || [])
+  ];
 
   // Try to match grounding chunks to stops
   if (stops && stops.length > 0 && groundingChunks && groundingChunks.length > 0) {
@@ -215,7 +193,12 @@ Output exactly a JSON block in the following structure inside your markdown text
 }
 
 /**
- * Orchestrator to compose Synthesis final payload.
+ * SynthesisSubAgent — invokes the managed agent `threshold-synthesis-subagent`
+ * (see SUBAGENT_SPECS.synthesis) and returns the final PlanOutput JSON.
+ *
+ * The system instruction lives on the managed agent itself (the medical-advice
+ * firewall, the Stull/USMC citation requirement, the schema conformance rule).
+ * The per-interaction input only carries the live data context.
  */
 async function synthesizeSchedulePlanWithAI(
   reqLocation: string,
@@ -226,14 +209,13 @@ async function synthesizeSchedulePlanWithAI(
   coolingStops: any[]
 ): Promise<{ data: PlanOutput; durationMs: number }> {
   const startTime = Date.now();
-  const ai = getGeminiClient();
 
   // Find peak wet-bulb temperature in the upcoming forecast window
   const wetBulbPeakF = forecasts.reduce((max, f) => Math.max(max, f.wetBulbF), 0);
   const matchedFlag = getFlagForWetBulb(wetBulbPeakF);
+  const agentId = await ensureAgent(SUBAGENT_SPECS.synthesis);
 
-  const prompt = `You are SynthesisSubAgent, a strict environmental logistics scheduling coordinator.
-We are analyzing safety parameters for an outdoor plan today:
+  const input = `Compose a scheduling verdict for this Threshold run.
 
 Activity: "${reqActivity}"
 Target Start Time: "${reqTime}"
@@ -242,55 +224,57 @@ Resolved Central Location: "${resolved.resolvedLabel}" (${resolved.lat}, ${resol
 Upcoming 24-hour meteorological profile:
 ${JSON.stringify(forecasts, null, 2)}
 
-A list of matched physical cooling / shelter refuges:
+Physical refuges identified by PlaceSubAgent:
 ${JSON.stringify(coolingStops, null, 2)}
 
-Task:
-Your job is to deliver a scheduling verdict: 'go', 'delay', or 'alternate' based on heat levels, thermal safety, and coordinates.
+Computed peak wet-bulb (Stull 2011): ${wetBulbPeakF}°F (matched flag: ${matchedFlag}).
 
-Strict Constraints:
-1. FIREWALL ON MEDICAL ADVICE: Under NO circumstances are you to offer medical diagnostic advice, list clinical disease symptoms, or use clinical healthcare terminology (never use: "medical", "doctor", "health", "symptoms", "diagnosis", "illness", "treatment", "patient"). Speak purely of scheduling, environmental risks, weather suitability, and exertion thresholds.
-2. CITE SCIENTIFIC ETHOLOGY: Reference Stull (2011) for wet-bulb math and USMC 6200.1E for training flag thresholds in environmental notes.
-3. SCHEMA CONFORMANCE: The final payload MUST comply exactly with the structured JSON schema.
-4. CHAR OVERLAYS: reasoning field must be <= 400 characters, headline field <= 80 characters.
+Respond with the structured JSON only.`;
 
-Provide your verdict and parameters in structured JSON format.`;
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-3.5-flash',
-    contents: prompt,
-    config: {
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          verdict: { type: Type.STRING, enum: ['go', 'delay', 'alternate'] },
-          departBy: { type: Type.STRING, nullable: true, description: 'ISO timestamp or null if delay' },
-          delayUntil: { type: Type.STRING, nullable: true, description: 'ISO timestamp or null if go' },
-          headline: { type: Type.STRING, description: 'Summary message under 80 characters' },
-          reasoning: { type: Type.STRING, description: 'Direct logistical logic under 400 characters' },
-          wetBulbPeakF: { type: Type.INTEGER, description: `The maximum computed wet-bulb in Fahrenheit (e.g. ${wetBulbPeakF})` },
-          flag: { type: Type.STRING, enum: ['white', 'green', 'yellow', 'red', 'black'] },
-          coolingStops: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                name: { type: Type.STRING },
-                placeId: { type: Type.STRING },
-                lat: { type: Type.NUMBER },
-                lng: { type: Type.NUMBER },
-                distanceMeters: { type: Type.NUMBER },
-                why: { type: Type.STRING },
-                mapsUri: { type: Type.STRING, description: 'Live Google Maps URL or fallback search URL', nullable: true }
-              },
-              required: ['name', 'placeId', 'lat', 'lng', 'distanceMeters', 'why']
-            }
-          },
-          spatial: {
+  const result = await runAgentInteraction({
+    agentId,
+    inputText: input,
+    responseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        verdict: { type: Type.STRING, enum: ['go', 'delay', 'alternate'] },
+        departBy: { type: Type.STRING, nullable: true, description: 'ISO timestamp or null if delay' },
+        delayUntil: { type: Type.STRING, nullable: true, description: 'ISO timestamp or null if go' },
+        headline: { type: Type.STRING, description: 'Summary message under 80 characters' },
+        reasoning: { type: Type.STRING, description: 'Direct logistical logic under 400 characters' },
+        wetBulbPeakF: { type: Type.INTEGER, description: `Peak wet-bulb in Fahrenheit (e.g. ${wetBulbPeakF})` },
+        flag: { type: Type.STRING, enum: ['white', 'green', 'yellow', 'red', 'black'] },
+        coolingStops: {
+          type: Type.ARRAY,
+          items: {
             type: Type.OBJECT,
             properties: {
-              origin: {
+              name: { type: Type.STRING },
+              placeId: { type: Type.STRING },
+              lat: { type: Type.NUMBER },
+              lng: { type: Type.NUMBER },
+              distanceMeters: { type: Type.NUMBER },
+              why: { type: Type.STRING },
+              mapsUri: { type: Type.STRING, description: 'Live Google Maps URL or fallback search URL', nullable: true }
+            },
+            required: ['name', 'placeId', 'lat', 'lng', 'distanceMeters', 'why']
+          }
+        },
+        spatial: {
+          type: Type.OBJECT,
+          properties: {
+            origin: {
+              type: Type.OBJECT,
+              properties: {
+                lat: { type: Type.NUMBER },
+                lng: { type: Type.NUMBER },
+                label: { type: Type.STRING }
+              },
+              required: ['lat', 'lng', 'label']
+            },
+            waypoints: {
+              type: Type.ARRAY,
+              items: {
                 type: Type.OBJECT,
                 properties: {
                   lat: { type: Type.NUMBER },
@@ -298,48 +282,35 @@ Provide your verdict and parameters in structured JSON format.`;
                   label: { type: Type.STRING }
                 },
                 required: ['lat', 'lng', 'label']
-              },
-              waypoints: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    lat: { type: Type.NUMBER },
-                    lng: { type: Type.NUMBER },
-                    label: { type: Type.STRING }
-                  },
-                  required: ['lat', 'lng', 'label']
-                }
-              },
-              headingNote: { type: Type.STRING }
+              }
             },
-            required: ['origin', 'waypoints', 'headingNote']
+            headingNote: { type: Type.STRING }
           },
-          envNotes: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: 'Scientific citations and brief environmental logistics details'
-          }
+          required: ['origin', 'waypoints', 'headingNote']
         },
-        required: [
-          'verdict',
-          'departBy',
-          'delayUntil',
-          'headline',
-          'reasoning',
-          'wetBulbPeakF',
-          'flag',
-          'coolingStops',
-          'spatial',
-          'envNotes'
-        ]
-      }
+        envNotes: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Scientific citations and brief environmental logistics details'
+        }
+      },
+      required: [
+        'verdict',
+        'departBy',
+        'delayUntil',
+        'headline',
+        'reasoning',
+        'wetBulbPeakF',
+        'flag',
+        'coolingStops',
+        'spatial',
+        'envNotes'
+      ]
     }
   });
 
   const durationMs = Date.now() - startTime;
-  const text = response.text || '{}';
-  const data = JSON.parse(text) as PlanOutput;
+  const data = JSON.parse(result.text || '{}') as PlanOutput;
 
   // Verify parameters
   data.wetBulbPeakF = wetBulbPeakF;
@@ -829,25 +800,46 @@ export async function runOrchestrationGraph(
     agentTrace.push({ agentName: 'LocationResolutionSubAgent', status: 'running', durationMs: 0 });
     const { data: routeInfo, durationMs: geoDuration } = await recorder.withSpan(
       'LocationResolutionSubAgent',
-      { model: 'gemini-3.5-flash', tool: 'structured-output' },
+      { managed_agent: SUBAGENT_SPECS.location.id, tool: 'structured-output' },
       () => resolveLocationWithAI(location, activity),
       r => `lat=${r.data.lat.toFixed(4)} lng=${r.data.lng.toFixed(4)} waypoints=${r.data.waypoints.length}`
     );
 
     agentTrace[0].status = 'success';
     agentTrace[0].durationMs = geoDuration;
-    agentTrace[0].outputSummary = `Resolved central coordinate to (${routeInfo.lat.toFixed(4)}, ${routeInfo.lng.toFixed(4)}) with ${routeInfo.waypoints.length} route stops.`;
+    agentTrace[0].outputSummary = `Managed agent ${SUBAGENT_SPECS.location.id} resolved center (${routeInfo.lat.toFixed(4)}, ${routeInfo.lng.toFixed(4)}) + ${routeInfo.waypoints.length} waypoints.`;
 
-    // 2. WeatherSubAgent: Retrieve meteo profile (NWS -> Open-Meteo cascade)
-    const weatherStart = Date.now();
+    // 2 + 3. PARALLEL FAN-OUT — WeatherSubAgent and PlaceSubAgent are managed
+    // agents that depend on routeInfo but not on each other, so the
+    // PrimaryAgent dispatches them concurrently per the Managed Agents
+    // parallel-agent pattern.
+    const parallelStart = Date.now();
     agentTrace.push({ agentName: 'WeatherSubAgent', status: 'running', durationMs: 0 });
-    const forecasts = await recorder.withSpan(
-      'WeatherSubAgent',
-      { tool: 'getHourlyHeatPoints', cascade: 'nws->open-meteo->simulated' },
-      () => getHourlyForecasts(routeInfo.lat, routeInfo.lng),
-      f => `${f.length} hours; peakF=${Math.max(...f.map(x => x.temperatureF))}; source=${getLastWeatherSource(routeInfo.lat, routeInfo.lng)}`
-    );
-    const weatherDuration = Date.now() - weatherStart;
+    const weatherTraceIdx = agentTrace.length - 1;
+    agentTrace.push({ agentName: 'PlaceSubAgent', status: 'running', durationMs: 0 });
+    const placeTraceIdx = agentTrace.length - 1;
+
+    const [forecasts, placeResult] = await Promise.all([
+      recorder.withSpan(
+        'WeatherSubAgent',
+        { tool: 'getHourlyHeatPoints', cascade: 'nws->open-meteo->simulated' },
+        () => getHourlyForecasts(routeInfo.lat, routeInfo.lng),
+        f => `${f.length} hours; peakF=${Math.max(...f.map(x => x.temperatureF))}; source=${getLastWeatherSource(routeInfo.lat, routeInfo.lng)}`
+      ),
+      recorder.withSpan(
+        'PlaceSubAgent',
+        { managed_agent: SUBAGENT_SPECS.place.id, tool: 'google-maps-grounding' },
+        () =>
+          getCoolingStopsWithAI(
+            routeInfo.lat,
+            routeInfo.lng,
+            routeInfo.resolvedLabel,
+            activity
+          ),
+        r => `${r.data.length} stops · ${r.groundingChunks.length} grounding chunks`
+      )
+    ]);
+    const parallelDuration = Date.now() - parallelStart;
 
     const weatherSource = getLastWeatherSource(routeInfo.lat, routeInfo.lng);
     const sourceLabel =
@@ -856,34 +848,20 @@ export async function runOrchestrationGraph(
         : weatherSource === 'open-meteo'
           ? 'Open-Meteo (NWS unavailable for this coordinate)'
           : 'simulated plausible profile (both NWS + Open-Meteo offline)';
-    agentTrace[1].status = 'success';
-    agentTrace[1].durationMs = weatherDuration;
-    agentTrace[1].outputSummary = `Hourly profile via ${sourceLabel}: base ${forecasts[0]?.temperatureF || 70}°F → peak ${Math.max(...forecasts.map(f => f.temperatureF))}°F. Wet-bulb derived per Stull (2011).`;
+    agentTrace[weatherTraceIdx].status = 'success';
+    agentTrace[weatherTraceIdx].durationMs = parallelDuration;
+    agentTrace[weatherTraceIdx].outputSummary = `Hourly profile via ${sourceLabel}: base ${forecasts[0]?.temperatureF || 70}°F → peak ${Math.max(...forecasts.map(f => f.temperatureF))}°F. Wet-bulb derived per Stull (2011). [parallel with PlaceSubAgent]`;
 
-    // 3. PlaceSubAgent: Locate refuge stops in parallel (Using real Google Maps Grounding!)
-    agentTrace.push({ agentName: 'PlaceSubAgent', status: 'running', durationMs: 0 });
-    const { data: stops, groundingChunks, durationMs: placeDuration } = await recorder.withSpan(
-      'PlaceSubAgent',
-      { model: 'gemini-3.5-flash', tool: 'google-maps-grounding' },
-      () =>
-        getCoolingStopsWithAI(
-          routeInfo.lat,
-          routeInfo.lng,
-          routeInfo.resolvedLabel,
-          activity
-        ),
-      r => `${r.data.length} stops · ${r.groundingChunks.length} grounding chunks`
-    );
-
-    agentTrace[2].status = 'success';
-    agentTrace[2].durationMs = placeDuration;
-    agentTrace[2].outputSummary = `Discovered ${stops.length} physical high-shelter fallback options anchored with Live Google Maps Grounding.`;
+    const { data: stops, groundingChunks } = placeResult;
+    agentTrace[placeTraceIdx].status = 'success';
+    agentTrace[placeTraceIdx].durationMs = parallelDuration;
+    agentTrace[placeTraceIdx].outputSummary = `Managed agent ${SUBAGENT_SPECS.place.id} discovered ${stops.length} physical refuges via Google Maps Grounding. [parallel with WeatherSubAgent]`;
 
     // 4. SynthesisSubAgent: Serial consolidation
     agentTrace.push({ agentName: 'SynthesisSubAgent', status: 'running', durationMs: 0 });
     const { data: synthesis, durationMs: synthDuration } = await recorder.withSpan(
       'SynthesisSubAgent',
-      { model: 'gemini-3.5-flash', tool: 'structured-output', schema: 'PlanOutput' },
+      { managed_agent: SUBAGENT_SPECS.synthesis.id, tool: 'structured-output', schema: 'PlanOutput' },
       () =>
         synthesizeSchedulePlanWithAI(location, activity, time, routeInfo, forecasts, stops),
       r => `verdict=${r.data.verdict} flag=${r.data.flag} wetBulbPeakF=${r.data.wetBulbPeakF}`
@@ -891,7 +869,7 @@ export async function runOrchestrationGraph(
 
     agentTrace[3].status = 'success';
     agentTrace[3].durationMs = synthDuration;
-    agentTrace[3].outputSummary = `Verdict complete: [${synthesis.verdict.toUpperCase()}]. Generated standard environmental markers.`;
+    agentTrace[3].outputSummary = `Managed agent ${SUBAGENT_SPECS.synthesis.id} returned verdict [${synthesis.verdict.toUpperCase()}], flag ${synthesis.flag}, ${synthesis.coolingStops.length} refuges.`;
 
     // 5. RouteDirectionsSubAgent: High-fidelity path coordinates + structured steps
     const directionsStart = Date.now();
