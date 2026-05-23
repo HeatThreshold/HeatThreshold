@@ -22,12 +22,13 @@ gh secret set VERCEL_ORG_ID      # the orgId from .vercel/project.json
 gh secret set VERCEL_PROJECT_ID  # the projectId from .vercel/project.json
 ```
 
-Set two Vercel environment variables (Vercel dashboard → Settings → Environment Variables):
+Set Vercel environment variables (Vercel dashboard → Settings → Environment Variables):
 
 | Name | Scope | Required | Notes |
 |---|---|---|---|
 | `GEMINI_API_KEY` | Production + Preview | ✅ yes | Without this, `POST /api/plan` 500s. McpReplay still works. |
 | `GOOGLE_MAPS_PLATFORM_KEY` | Production + Preview | ⚪ optional | Enables live Directions polylines, the Maps embed, and the 3D Tiles floor in XR. Without it, each surface falls back gracefully. |
+| `BLOB_READ_WRITE_TOKEN` | Production + Preview | ⚪ optional | Auto-set when a Vercel Blob store is provisioned (Storage → Create Database → Blob → connect to project). **Without it, live `/api/plan` runs don't persist** — only baked-in `mcp-traces/` fixtures are replayable. With it, every run writes to blob and `?replay=<runId>` works for any live run forever. |
 
 ### Every-deploy mechanics
 
@@ -87,7 +88,15 @@ A 10-minute checklist to run **before going on stage**:
 
 ## 3. McpTape recording management
 
-Recordings live in `mcp-traces/<runId>.json`. The Vercel function bundles whatever's in this directory at deploy time (per `includeFiles: mcp-traces/**` in [vercel.json](../vercel.json)).
+Recordings live in one of two stores depending on environment:
+
+| Environment | Storage | Persistence |
+|---|---|---|
+| **Production (Vercel + `BLOB_READ_WRITE_TOKEN`)** | Vercel Blob at `mcp-traces/<runId>.json` | Survives cold starts. Every live run is replayable indefinitely. |
+| **Production (Vercel, no blob token)** | Read-only `mcp-traces/` from the deploy bundle | Only baked-in fixtures committed pre-deploy are replayable. Live runs vanish at request-end. |
+| **Local dev (`npm run dev`)** | `mcp-traces/<runId>.json` on the repo filesystem | Persisted between dev-server restarts. Commit individual recordings to ship them with future deploys. |
+
+McpTape tries Blob first when the token is present, then falls back to filesystem. McpReplay does the same on read. The two backends are interchangeable — fixtures committed to `mcp-traces/` and live runs written to Blob both surface via the same `/api/replay/:runId` endpoint.
 
 ### To ship a baked-in replay with the deploy
 

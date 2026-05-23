@@ -87,6 +87,12 @@ The trace/record/replay stack is the demo safety net and the secondary technical
 ### McpTape (recording)
 [src/lib/observability/mcptape.ts](src/lib/observability/mcptape.ts) — every successful run is written to `mcp-traces/<runId>.json` containing the full `PlanResult` plus the PlatAtlas span tree. Fire-and-forget so recording errors never bubble to the user.
 
+**Two storage backends, transparent to callers:**
+- **Vercel Blob** (production, when `BLOB_READ_WRITE_TOKEN` is set) — runs survive cold starts and are replayable forever.
+- **Filesystem** (local dev + production fallback for bundled fixtures) — `mcp-traces/<runId>.json` committed to the repo ships with the deploy.
+
+McpReplay tries Blob first, then filesystem, so the two are interchangeable.
+
 ### McpReplay (playback)
 [src/lib/observability/mcpreplay.ts](src/lib/observability/mcpreplay.ts) — `GET /api/replay/:runId` returns the cached PlanResult; `GET /api/trace/:runId` returns the span tree. The dashboard supports `?replay=<runId>` to hydrate from a recording instead of generating a new run. **This is the demo safety net** — if the live managed-agents call fails on stage, swapping to `?replay=<id>` produces an identical card from cached LLM responses.
 
