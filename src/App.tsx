@@ -879,9 +879,18 @@ function Dashboard() {
               {/* Grounded Live Google Maps references block */}
               {(((currentPlan as any).groundingChunks && (currentPlan as any).groundingChunks.length > 0) || currentPlan.coolingStops?.some(s => s.placeId.startsWith('gmp-'))) && (
                 <div className="mt-3 pt-3 border-t border-slate-100 shrink-0">
-                  <p className="text-[9px] font-bold uppercase tracking-wider text-[#202124]/40 font-mono mb-1.5 flex items-center gap-1">
+                  <p className="text-[9px] font-bold uppercase tracking-wider text-[#202124]/40 font-mono mb-1.5 flex items-center gap-1.5">
                     <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#1a73e8] animate-pulse"></span>
                     Grounded Live Maps References:
+                    {currentPlan.mapsWidgetContextToken && (
+                      <span
+                        className="ml-1 inline-flex items-center gap-1 px-1.5 py-0.5 bg-[#fef7e0] text-[#b06000] rounded border border-[#fde293] tracking-tighter normal-case font-mono"
+                        title={`Maps Imagery Grounding widget token captured (${currentPlan.mapsWidgetContextToken.slice(0, 12)}…) — Street View + place photos + reviews are anchored to the refuges the PlaceSubAgent identified.`}
+                      >
+                        <span className="inline-block w-1 h-1 rounded-full bg-[#fbbc05]"></span>
+                        + Maps Imagery
+                      </span>
+                    )}
                   </p>
                   <div className="flex flex-wrap gap-1.5 max-h-[50px] overflow-y-auto">
                     {((currentPlan as any).groundingChunks && (currentPlan as any).groundingChunks.length > 0) ? (

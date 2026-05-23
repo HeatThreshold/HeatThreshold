@@ -83,7 +83,7 @@ async function getCoolingStopsWithAI(
   lng: number,
   resolvedLabel: string,
   activity: string
-): Promise<{ data: any[]; groundingChunks: any[]; durationMs: number }> {
+): Promise<{ data: any[]; groundingChunks: any[]; widgetContextToken: string | null; durationMs: number }> {
   const startTime = Date.now();
   const agentId = await ensureAgent(SUBAGENT_SPECS.place);
 
@@ -106,7 +106,12 @@ Output exactly one JSON block inside your markdown reply:
   ]
 }
 \`\`\``,
-    perInteractionTools: [{ googleMaps: {} }],
+    // Maps Imagery Grounding: enableWidget yields a widget_context_token in
+    // the grounding metadata. The dashboard renders a Google Maps embed
+    // widget keyed off that token, which paints Street View + place photos
+    // + reviews for the exact refuges the model identified.
+    // https://mapsplatform.google.com/maps-products/grounding/#maps-imagery-grounding
+    perInteractionTools: [{ googleMaps: { enableWidget: true } }],
     toolConfig: {
       retrievalConfig: {
         latLng: { latitude: lat, longitude: lng }
@@ -189,7 +194,28 @@ Output exactly one JSON block inside your markdown reply:
     });
   }
 
-  return { data: stops, groundingChunks, durationMs };
+  // Walk the raw interaction tree for the Maps Imagery Grounding widget token.
+  // The SDK populates it on google_maps_result steps under each step.result[].
+  let widgetContextToken: string | null = null;
+  const raw = result.raw as any;
+  const stepList = raw?.steps || raw?.candidates?.[0]?.steps || [];
+  for (const step of stepList) {
+    if (step?.type === 'google_maps_result' && Array.isArray(step.result)) {
+      for (const r of step.result) {
+        if (r?.widget_context_token) {
+          widgetContextToken = r.widget_context_token;
+          break;
+        }
+      }
+    }
+    // Defensive: some SDK versions surface the token on the chunk itself.
+    const chunkToken = step?.grounding_metadata?.widget_context_token
+      || step?.metadata?.widget_context_token;
+    if (chunkToken) widgetContextToken = chunkToken;
+    if (widgetContextToken) break;
+  }
+
+  return { data: stops, groundingChunks, widgetContextToken, durationMs };
 }
 
 /**
@@ -929,10 +955,10 @@ export async function runOrchestrationGraph(
     agentTrace[weatherTraceIdx].durationMs = parallelDuration;
     agentTrace[weatherTraceIdx].outputSummary = `Hourly profile via ${sourceLabel}: base ${forecasts[0]?.temperatureF || 70}°F → peak ${Math.max(...forecasts.map(f => f.temperatureF))}°F. Wet-bulb derived per Stull (2011). [parallel with PlaceSubAgent]`;
 
-    const { data: stops, groundingChunks } = placeResult;
+    const { data: stops, groundingChunks, widgetContextToken } = placeResult;
     agentTrace[placeTraceIdx].status = 'success';
     agentTrace[placeTraceIdx].durationMs = parallelDuration;
-    agentTrace[placeTraceIdx].outputSummary = `Managed agent ${SUBAGENT_SPECS.place.id} discovered ${stops.length} physical refuges via Google Maps Grounding. [parallel with WeatherSubAgent]`;
+    agentTrace[placeTraceIdx].outputSummary = `Managed agent ${SUBAGENT_SPECS.place.id} discovered ${stops.length} physical refuges via Google Maps Grounding${widgetContextToken ? ' + Maps Imagery widget token' : ''}. [parallel with WeatherSubAgent]`;
 
     // 4. SynthesisSubAgent: Serial consolidation
     agentTrace.push({ agentName: 'SynthesisSubAgent', status: 'running', durationMs: 0 });
@@ -1075,6 +1101,7 @@ export async function runOrchestrationGraph(
       agentTrace,
       traceSpans: spans,
       groundingChunks,
+      mapsWidgetContextToken: widgetContextToken,
       timestamp: new Date().toISOString(),
       request: { location, activity, time }
     };

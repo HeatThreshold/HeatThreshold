@@ -21,7 +21,7 @@ The product runs on the brand-new Gemini **Managed Agents API**. Three of the fo
 | Managed Agent ID | Role | Tools |
 |---|---|---|
 | `threshold-location-subagent` | Free-form location → coordinates + waypoints | (none) |
-| `threshold-place-subagent` | Real Google Maps refuges near a coord | `googleMaps` grounding (per-interaction) |
+| `threshold-place-subagent` | Real Google Maps refuges near a coord | `googleMaps` grounding (per-interaction) + **Maps Imagery Grounding** widget token ([docs](https://mapsplatform.google.com/maps-products/grounding/#maps-imagery-grounding)) |
 | `threshold-synthesis-subagent` | Composes the final go/delay/alternate verdict | (none) |
 
 Reference: [ai.google.dev/gemini-api/docs/agents](https://ai.google.dev/gemini-api/docs/agents).

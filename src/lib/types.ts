@@ -101,6 +101,13 @@ export interface PlanResult extends PlanOutput {
   /** When this PlanResult was served from a McpTape recording, the runId. */
   replayedFrom?: string;
   groundingChunks?: any[];
+  /**
+   * Maps Imagery Grounding widget token from the PlaceSubAgent interaction.
+   * The dashboard renders a Google Maps widget anchored to this token, which
+   * paints Street View + place photos + reviews for the exact refuges the
+   * model referenced. See https://mapsplatform.google.com/maps-products/grounding/
+   */
+  mapsWidgetContextToken?: string | null;
   timestamp: string;
   request: {
     location: string;
