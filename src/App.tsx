@@ -3,6 +3,7 @@ import { demoFixtures } from './lib/demoFixtures';
 import { PlanResult } from './lib/types';
 import { MapEmbed } from './components/MapEmbed';
 import { TraceViewer } from './components/TraceViewer';
+import { VoiceMode } from './components/VoiceMode';
 import {
   Compass,
   MapPin,
@@ -26,7 +27,8 @@ import {
   Calendar,
   AlertTriangle,
   Radio,
-  Pause
+  Pause,
+  Mic
 } from 'lucide-react';
 
 /**
@@ -58,6 +60,7 @@ function Dashboard() {
   
   const [isXrModalOpen, setIsXrModalOpen] = useState(false);
   const [xrMode, setXrMode] = useState<'static' | 'preview' | 'live'>('static');
+  const [isVoiceModeOpen, setIsVoiceModeOpen] = useState(false);
   const [timeState, setTimeState] = useState('11:06 AM PDT');
   const [dateState, setDateState] = useState('May 23, 2026');
   const [hoveredHourIndex, setHoveredHourIndex] = useState<number | null>(null);
@@ -376,6 +379,13 @@ function Dashboard() {
 
           {/* Live System Specs */}
           <div className="flex flex-wrap items-center gap-4 md:gap-6 text-xs shrink-0">
+            <button
+              onClick={() => setIsVoiceModeOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-[10px] font-mono font-bold uppercase tracking-widest transition-all cursor-pointer bg-[#1a73e8]/10 border-[#1a73e8]/40 text-[#1a73e8] hover:bg-[#1a73e8]/20 shadow-sm"
+              title="Open Voice Mode — talks to Gemini Live, which calls runThresholdPlan → /api/plan via tool use."
+            >
+              <Mic className="w-3.5 h-3.5" /> Voice Mode
+            </button>
             <button
               onClick={() => setIsWatching(w => !w)}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-[10px] font-mono font-bold uppercase tracking-widest transition-all cursor-pointer ${
@@ -1062,6 +1072,21 @@ function Dashboard() {
           </div>
         </footer>
       </div>
+
+      {/* Gemini Live ↔ Managed Agents Voice Bridge */}
+      {isVoiceModeOpen && (
+        <VoiceMode
+          onClose={() => setIsVoiceModeOpen(false)}
+          onPlan={(plan) => {
+            setCurrentPlan(plan);
+            setSelectedPreset('');
+            setLocationInput(plan.request.location);
+            setActivityInput(plan.request.activity);
+            setTimeInput(plan.request.time);
+            setErrorMsg(null);
+          }}
+        />
+      )}
 
       {/* Spatial XR 3D Immersive Simulation Modal */}
       {isXrModalOpen && (

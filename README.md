@@ -2,7 +2,7 @@
 
 **Built for Google I/O Hackathon · May 23, 2026 · 100% new work.**
 
-Heat Threshold is an environmental scheduling tool. You give it *where*, *what activity*, and *what time* — a primary Gemini 3.5 Flash agent dispatches a graph of ten sub-agents (three managed, one weather cascade, six deterministic) and returns a scheduling verdict (`go` / `delay` / `alternate`) grounded in NWS weather, USMC 6200.1E flag thresholds, and live Google Maps refuges. The same plan renders as a 2D bento dashboard and as a playable WebXR spatial HUD.
+Heat Threshold is an environmental scheduling tool. You give it *where*, *what activity*, and *what time* — a primary Gemini 3.5 Flash agent dispatches a graph of ten sub-agents (three managed, one weather cascade, six deterministic) and returns a scheduling verdict (`go` / `delay` / `alternate`) grounded in NWS weather, USMC 6200.1E flag thresholds, and live Google Maps refuges. The same plan renders as a 2D bento dashboard, a playable WebXR spatial HUD, and a voice interface where Gemini Live calls the Managed Agents pipeline as a tool.
 
 > **Threshold is an environmental scheduling tool, not medical advice. Consult a healthcare professional for health concerns.**
 
@@ -29,8 +29,11 @@ Reference: [ai.google.dev/gemini-api/docs/agents](https://ai.google.dev/gemini-a
 ### 3. Antigravity CLI / IDE
 A `/threshold-plan` skill that POSTs to `/api/plan` from inside the Antigravity CLI and IDE, prints the verdict inline, and dumps the full 10-sub-agent trace. Script: [scripts/threshold-plan.ts](scripts/threshold-plan.ts). Setup + screencaps: [docs/antigravity-skill.md](docs/antigravity-skill.md). Try it: `npm run threshold-plan -- "Zilker Park Austin" "outdoor cycling" "13:00"`.
 
+### 4. Gemini Live (voice front-end)
+A click on the dashboard's "Voice Mode" button opens a bidirectional WebSocket to a Live-capable Gemini model. The user speaks; the Live model calls `runThresholdPlan` as a tool; the browser proxies that call to `/api/plan`; the same 10-sub-agent Managed Agents graph runs; the verdict comes back, the dashboard hydrates, and the model reads the result aloud. Live API and Managed Agents are bridged through function calling — see [Voice Mode](#voice-mode-gemini-live--managed-agents-bridge) below.
+
 ### Why "every surface" matters
-Gemini 3.5 Flash isn't just the model we called. It's the model we authored the prompts in (AI Studio), the model we drove from our dev environment (Antigravity), and the model running every sub-agent in production (Managed Agents). Same model, multiple surfaces, one workflow.
+Gemini 3.5 Flash isn't just the model we called. It's the model we authored the prompts in (AI Studio), the model we drove from our dev environment (Antigravity), the model running every sub-agent in production (Managed Agents), and — via a Live-capable preview model — the voice front-end that delegates back to those same managed agents. Same model family, four surfaces, one workflow.
 
 ---
 
@@ -156,6 +159,30 @@ URL params: `verdict`, `headline`, `reasoning`, `wetBulb`, `flag`, `spatial` (JS
 
 ---
 
+## Voice Mode (Gemini Live ↔ Managed Agents bridge)
+
+Click the **Voice Mode** button in the dashboard header (`Mic` icon). The browser opens a bidirectional WebSocket to the Gemini **Live API** and the same 10-sub-agent graph the dashboard uses is exposed to the Live model as a single function call.
+
+```
+browser ── mic 16kHz PCM ──▶ Gemini Live (WebSocket)
+browser ◀── 24kHz audio ──  Gemini Live
+        ◀── functionCall ──
+browser ── POST /api/plan ──▶ Heat Threshold orchestrator (Managed Agents)
+browser ── toolResponse ───▶ Gemini Live
+```
+
+Why a bridge and not a direct call? **Live API doesn't run on Gemini 3.5 Flash yet** (as of 2026-05-23) — Live runs on a separate preview model. So instead of moving the managed agents off 3.5 Flash, we let a Live-capable model handle realtime voice and delegate scheduling to the same Managed Agents pipeline already shipped.
+
+Pieces:
+- [src/server/createApp.ts](src/server/createApp.ts) — `POST /api/live/token` mints an ephemeral Gemini auth token (single-use, 30-min expiry) with the `runThresholdPlan` tool declaration and Heat Threshold system instruction locked in via `lockAdditionalFields`. The `GEMINI_API_KEY` never reaches the browser.
+- [src/lib/voice/liveClient.ts](src/lib/voice/liveClient.ts) — `VoiceSession` class. Fetches the token, opens `ai.live.connect(...)`, captures mic via Web Audio (16kHz PCM mono), plays back model audio (24kHz PCM), and routes `toolCall` events to `/api/plan`.
+- [src/components/VoiceMode.tsx](src/components/VoiceMode.tsx) — modal UI with live status pill (connecting / listening / thinking / speaking / tool-running), interleaved user + assistant transcripts, and an "End Session" button.
+- The dashboard hydrates from the returned `PlanResult` the moment `runThresholdPlan` resolves, so the bento grid + map + XR HUD all reflect the spoken request immediately.
+
+Env: `LIVE_API_MODEL` selects the Live-capable model (default `gemini-2.5-flash-preview-native-audio-dialog`). Override if Google ships a new audio-native preview.
+
+---
+
 ## Local dev setup
 
 Prereqs: Node 20+ and a `GEMINI_API_KEY`.
@@ -171,12 +198,14 @@ npm run dev            # http://localhost:3000
 Optional env:
 - `GOOGLE_MAPS_PLATFORM_KEY` — unlocks **three** Maps features at once: the live Google Maps embed on the dashboard (falls back to Leaflet/OSM), the live Directions API polyline in `RouteDirectionsSubAgent` (falls back to straight-line interpolation), and the Google Photorealistic 3D Tiles floor in the WebXR scene (falls back to a flat satellite plane). The dashboard forwards this key to `xr.html` via the `gmpKey` URL param.
 - `BLOB_READ_WRITE_TOKEN` — enables the Vercel Blob backend for McpTape recordings. Without it, recordings still work but stay on the local filesystem.
+- `LIVE_API_MODEL` — overrides the model ID used by Voice Mode's ephemeral token. Default: `gemini-2.5-flash-preview-native-audio-dialog`.
 
 API surface:
 - `GET  /api/health` → liveness + env-key presence (no LLM calls, fast)
 - `POST /api/plan { location, activity, time }` → live managed-agents run
 - `GET  /api/plan?demo=sf-route|zilker-bike|hyde-park` → instant preset
 - `POST /api/watch/tick { plan }` → one Live Watch tick (slim payload)
+- `POST /api/live/token` → mints an ephemeral Gemini Live API token (single-use, tool + system-instruction locked)
 - `GET  /api/replay/:runId` → cached McpTape PlanResult
 - `GET  /api/trace/:runId` → PlatAtlas span tree
 - `GET  /api/runs` → list of recorded runs
