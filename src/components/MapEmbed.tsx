@@ -433,12 +433,19 @@ export function MapEmbed({ spatial, coolingStops }: MapEmbedProps) {
                   </InfoWindow>
                 )}
 
-                {/* Direct Polyline Connection — halo + main + animated chevron */}
+                {/* Direct Polyline Connection — uses the optimized directionsPath
+                    from RouteOptimizationSubAgent (threads through every refuge in
+                    TSP-optimal order) when available, else falls back to a straight
+                    connector through the explicit waypoints. */}
                 <RoutePolyline
-                  points={[
-                    { lat: spatial.origin.lat, lng: spatial.origin.lng },
-                    ...spatial.waypoints.map(wp => ({ lat: wp.lat, lng: wp.lng }))
-                  ]}
+                  points={
+                    spatial.directionsPath && spatial.directionsPath.length >= 2
+                      ? spatial.directionsPath
+                      : [
+                          { lat: spatial.origin.lat, lng: spatial.origin.lng },
+                          ...spatial.waypoints.map(wp => ({ lat: wp.lat, lng: wp.lng }))
+                        ]
+                  }
                 />
               </Map>
 

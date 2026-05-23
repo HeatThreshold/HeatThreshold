@@ -391,26 +391,78 @@ interface DirectionsStep {
   maneuver: string;
 }
 
+interface OptimizedViaPoint {
+  kind: 'waypoint' | 'refuge';
+  originalIndex: number;
+  newIndex: number;
+  lat: number;
+  lng: number;
+  label: string;
+}
+
+interface DirectionsResult {
+  path: Array<{ lat: number; lng: number }>;
+  steps: DirectionsStep[];
+  usedLive: boolean;
+  optimizedOrder: OptimizedViaPoint[];
+  reorderedFromOriginal: boolean;
+}
+
 /**
- * Fetch Google Directions and return both the decoded polyline and the
- * structured step list (used by NavigationArrowsSubAgent for ground arrows).
+ * Fetch Google Directions and return the decoded polyline, structured steps,
+ * AND the optimized via-point ordering. Middle waypoints and cooling-stop
+ * refuges are combined into a single via-point list, prefixed with the
+ * Directions API's `optimize:true` flag so Google's TSP solver reorders them
+ * by geographic proximity. Origin and destination are pinned and never
+ * reordered.
  */
 async function fetchGoogleDirections(
   origin: { lat: number; lng: number },
   destination: { lat: number; lng: number },
-  waypoints: Array<{ lat: number; lng: number }>
-): Promise<{ path: Array<{ lat: number; lng: number }>; steps: DirectionsStep[]; usedLive: boolean }> {
+  middleWaypoints: Array<{ lat: number; lng: number; label?: string }>,
+  refuges: Array<{ lat: number; lng: number; name?: string }> = []
+): Promise<DirectionsResult> {
   const apiKey = process.env.GOOGLE_MAPS_PLATFORM_KEY || '';
-  const straightPath = [origin, ...waypoints, destination];
+  // Original via-point order, indexed for RouteOptimizationSubAgent reporting.
+  const viaPoints: Array<OptimizedViaPoint> = [
+    ...middleWaypoints.map((wp, i) => ({
+      kind: 'waypoint' as const,
+      originalIndex: i,
+      newIndex: i,
+      lat: wp.lat,
+      lng: wp.lng,
+      label: wp.label || `Waypoint ${i + 1}`
+    })),
+    ...refuges.map((r, i) => ({
+      kind: 'refuge' as const,
+      originalIndex: i,
+      newIndex: middleWaypoints.length + i,
+      lat: r.lat,
+      lng: r.lng,
+      label: r.name || `Refuge ${i + 1}`
+    }))
+  ];
+  const straightPath = [origin, ...viaPoints.map(v => ({ lat: v.lat, lng: v.lng })), destination];
 
   if (!apiKey || apiKey.includes('YOUR_') || apiKey.includes('MY_') || apiKey.includes('placeholder')) {
     console.warn('[DirectionsSubAgent] Google Maps Platform Key is missing or invalid. Falling back to straight-line interpolation.');
-    return { path: straightPath, steps: [], usedLive: false };
+    return { path: straightPath, steps: [], usedLive: false, optimizedOrder: viaPoints, reorderedFromOriginal: false };
+  }
+
+  if (viaPoints.length === 0) {
+    // No via points — just origin → destination, no optimization needed.
+    // Fall through to the direct request below.
   }
 
   try {
-    const waypointsStr = waypoints.map(wp => `${wp.lat},${wp.lng}`).join('|');
-    const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin.lat},${origin.lng}&destination=${destination.lat},${destination.lng}&waypoints=${waypointsStr}&mode=walking&key=${apiKey}`;
+    const viaStr = viaPoints.map(v => `via:${v.lat},${v.lng}`).join('|');
+    // `optimize:true` reorders the via points by Google's TSP solver while
+    // pinning origin and destination. The `via:` prefix makes each one a
+    // pass-through with no "arrival" stop, which is what we want for refuges.
+    const waypointsParam = viaPoints.length > 0
+      ? `&waypoints=optimize:true|${viaStr}`
+      : '';
+    const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin.lat},${origin.lng}&destination=${destination.lat},${destination.lng}${waypointsParam}&mode=walking&key=${apiKey}`;
 
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP status ${res.status}`);
@@ -418,11 +470,23 @@ async function fetchGoogleDirections(
 
     if (data.status !== 'OK' || !data.routes || data.routes.length === 0) {
       console.warn(`[DirectionsSubAgent] Directions API returned non-OK status: ${data.status}. Falling back to straight line.`);
-      return { path: straightPath, steps: [], usedLive: false };
+      return { path: straightPath, steps: [], usedLive: false, optimizedOrder: viaPoints, reorderedFromOriginal: false };
     }
 
     const route = data.routes[0];
     const points = decodePolyline(route.overview_polyline.points);
+
+    // route.waypoint_order is the permutation Google chose. Re-apply it so
+    // the optimizedOrder list reflects the actual sequence the polyline
+    // traverses.
+    const waypointOrder: number[] = Array.isArray(route.waypoint_order)
+      ? route.waypoint_order
+      : viaPoints.map((_, i) => i);
+    const reordered: OptimizedViaPoint[] = waypointOrder.map((origIdx, newIdx) => ({
+      ...viaPoints[origIdx],
+      newIndex: newIdx
+    }));
+    const reorderedFromOriginal = waypointOrder.some((v, i) => v !== i);
 
     // Flatten legs->steps into our DirectionsStep shape
     const steps: DirectionsStep[] = [];
@@ -443,11 +507,13 @@ async function fetchGoogleDirections(
     return {
       path: points.length > 0 ? points : straightPath,
       steps,
-      usedLive: true
+      usedLive: true,
+      optimizedOrder: reordered,
+      reorderedFromOriginal
     };
   } catch (error) {
     console.error('[DirectionsSubAgent] Failed to fetch directions from Google Maps API:', error);
-    return { path: straightPath, steps: [], usedLive: false };
+    return { path: straightPath, steps: [], usedLive: false, optimizedOrder: viaPoints, reorderedFromOriginal: false };
   }
 }
 
@@ -871,20 +937,29 @@ export async function runOrchestrationGraph(
     agentTrace[3].durationMs = synthDuration;
     agentTrace[3].outputSummary = `Managed agent ${SUBAGENT_SPECS.synthesis.id} returned verdict [${synthesis.verdict.toUpperCase()}], flag ${synthesis.flag}, ${synthesis.coolingStops.length} refuges.`;
 
-    // 5. RouteDirectionsSubAgent: High-fidelity path coordinates + structured steps
+    // 5. RouteDirectionsSubAgent + RouteOptimizationSubAgent: Google Directions
+    // with `optimize:true` on the combined waypoints+refuges via-point list.
+    // Origin and destination are pinned; everything in between is reordered
+    // by Google's TSP solver for minimum total walking distance.
     const directionsStart = Date.now();
     agentTrace.push({ agentName: 'RouteDirectionsSubAgent', status: 'running', durationMs: 0 });
 
     const origin = synthesis.spatial.origin;
     const waypoints = synthesis.spatial.waypoints;
     const dest = waypoints[waypoints.length - 1] || origin;
-    const waypointMiddles = waypoints.slice(0, -1);
+    const waypointMiddles = waypoints.slice(0, -1).map(w => ({ lat: w.lat, lng: w.lng, label: w.label }));
+    const refugeViaPoints = synthesis.coolingStops.map(s => ({ lat: s.lat, lng: s.lng, name: s.name }));
 
-    const { path: directionsPath, steps: directionSteps, usedLive } = await recorder.withSpan(
+    const { path: directionsPath, steps: directionSteps, usedLive, optimizedOrder, reorderedFromOriginal } = await recorder.withSpan(
       'RouteDirectionsSubAgent',
-      { tool: 'google-maps-directions', mode: 'walking' },
-      () => fetchGoogleDirections(origin, dest, waypointMiddles),
-      r => `live=${r.usedLive} polyline=${r.path.length}pts steps=${r.steps.length}`
+      {
+        tool: 'google-maps-directions',
+        mode: 'walking',
+        viaPoints: waypointMiddles.length + refugeViaPoints.length,
+        optimize: 'true'
+      },
+      () => fetchGoogleDirections(origin, dest, waypointMiddles, refugeViaPoints),
+      r => `live=${r.usedLive} polyline=${r.path.length}pts steps=${r.steps.length} reordered=${r.reorderedFromOriginal}`
     );
     synthesis.spatial.directionsPath = directionsPath;
 
@@ -894,16 +969,39 @@ export async function runOrchestrationGraph(
       status: 'success',
       durationMs: directionsDuration,
       outputSummary: usedLive
-        ? `Traced ${directionsPath.length} polyline points and ${directionSteps.length} turn-by-turn maneuvers via Google Maps Directions API (walking mode).`
-        : `Google Maps key absent — generated ${directionsPath.length}-pt straight-line interpolation. Set GOOGLE_MAPS_PLATFORM_KEY for live turn-by-turn.`
+        ? `Traced ${directionsPath.length} polyline points and ${directionSteps.length} turn-by-turn maneuvers through ${waypointMiddles.length} required waypoints + ${refugeViaPoints.length} refuges via Google Maps Directions API (walking mode, optimize:true).`
+        : `Google Maps key absent — generated ${directionsPath.length}-pt straight-line interpolation through ${waypointMiddles.length + refugeViaPoints.length} via points. Set GOOGLE_MAPS_PLATFORM_KEY for live turn-by-turn.`
+    };
+
+    // 5b. RouteOptimizationSubAgent: documents the reorder so the trace + UI
+    // can explain why refuges appear in a different sequence than they were
+    // discovered. This is deterministic (Google's TSP solver), but the agent
+    // boundary makes the optimization visible in PlatAtlas and the dashboard.
+    const optimStart = Date.now();
+    agentTrace.push({ agentName: 'RouteOptimizationSubAgent', status: 'running', durationMs: 0 });
+    await recorder.withSpan(
+      'RouteOptimizationSubAgent',
+      { algorithm: 'tsp-via-google-directions', reorderedFromOriginal: String(reorderedFromOriginal) },
+      async () => optimizedOrder,
+      o => `${o.length} via points · ${o.filter(v => v.kind === 'refuge').length} refuges · reordered=${reorderedFromOriginal}`
+    );
+    const optimSummary = reorderedFromOriginal
+      ? `Reordered ${optimizedOrder.length} via points (${optimizedOrder.filter(v => v.kind === 'refuge').length} refuges threaded into the route). New sequence: ${optimizedOrder.map(v => v.label).join(' → ')}.`
+      : `${optimizedOrder.length} via points already in optimal order; no reorder needed.`;
+    agentTrace[agentTrace.length - 1] = {
+      agentName: 'RouteOptimizationSubAgent',
+      status: 'success',
+      durationMs: Date.now() - optimStart,
+      outputSummary: optimSummary
     };
 
     // 6. NavigationArrowsSubAgent: Ground-anchored arrows for XR
     const navStart = Date.now();
     agentTrace.push({ agentName: 'NavigationArrowsSubAgent', status: 'running', durationMs: 0 });
+    const navIdx = agentTrace.length - 1;
     const arrows = buildNavigationArrows(directionSteps, directionsPath);
     synthesis.spatial.navigationArrows = arrows;
-    agentTrace[5] = {
+    agentTrace[navIdx] = {
       agentName: 'NavigationArrowsSubAgent',
       status: 'success',
       durationMs: Date.now() - navStart,
@@ -913,6 +1011,7 @@ export async function runOrchestrationGraph(
     // 7. SunPathSubAgent: Solar position + shade factor along route
     const sunStart = Date.now();
     agentTrace.push({ agentName: 'SunPathSubAgent', status: 'running', durationMs: 0 });
+    const sunIdx = agentTrace.length - 1;
     const activityWhen = parseRequestTime(time);
     const sunSamples = buildSunSamples(directionsPath, activityWhen);
     synthesis.spatial.sunSamples = sunSamples;
@@ -922,7 +1021,7 @@ export async function runOrchestrationGraph(
     const meanElev = sunSamples.length
       ? Math.round(sunSamples.reduce((a, s) => a + s.elevationDeg, 0) / sunSamples.length)
       : 0;
-    agentTrace[6] = {
+    agentTrace[sunIdx] = {
       agentName: 'SunPathSubAgent',
       status: 'success',
       durationMs: Date.now() - sunStart,
@@ -932,12 +1031,13 @@ export async function runOrchestrationGraph(
     // 8. RefugeBreakSubAgent: Rest break scheduling
     const breakStart = Date.now();
     agentTrace.push({ agentName: 'RefugeBreakSubAgent', status: 'running', durationMs: 0 });
+    const breakIdx = agentTrace.length - 1;
 
     const { workRestRatio, suggestedBreaks } = scheduleRefugeBreaks(directionsPath, synthesis.wetBulbPeakF, synthesis.flag);
     synthesis.workRestRatio = workRestRatio;
     synthesis.suggestedBreaks = suggestedBreaks;
 
-    agentTrace[7] = {
+    agentTrace[breakIdx] = {
       agentName: 'RefugeBreakSubAgent',
       status: 'success',
       durationMs: Date.now() - breakStart,
@@ -947,8 +1047,9 @@ export async function runOrchestrationGraph(
     // 9. StreetViewPanoSubAgent: First-person previews oriented to heading
     const svStart = Date.now();
     agentTrace.push({ agentName: 'StreetViewPanoSubAgent', status: 'running', durationMs: 0 });
+    const svIdx = agentTrace.length - 1;
     attachStreetViewPanoramas(origin, waypoints, synthesis.coolingStops as any, suggestedBreaks);
-    agentTrace[8] = {
+    agentTrace[svIdx] = {
       agentName: 'StreetViewPanoSubAgent',
       status: 'success',
       durationMs: Date.now() - svStart,
