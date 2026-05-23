@@ -117,13 +117,18 @@ Click the **Live Watch** toggle in the dashboard header (`Radio` icon). The brow
 
 ## WebXR spatial HUD
 
-`/xr.html` is a self-contained xrblocks scene that consumes the same `PlanResult` JSON via URL parameters. It renders:
+[public/xr.html](public/xr.html) is a self-contained xrblocks scene that consumes the same `PlanResult` JSON via URL parameters. It renders:
 
-- A holographic projection of the route with origin + waypoints + cooling stops as 3D nodes.
-- Ground-anchored heading arrows from `NavigationArrowsSubAgent` with a travelling opacity wave.
-- Colored route segments from `SunPathSubAgent` (amber = sun-exposed, teal = shaded).
-- Pulsing water/shade break beacons selectable to surface Street View links.
-- A Live Watch panel that hot-updates the wet-bulb readout when the dashboard ticks.
+- **Holographic route projection** — origin + waypoints + cooling stops as 3D nodes with connecting lines and a true-north reference rose.
+- **Ground arrows** from `NavigationArrowsSubAgent` with a travelling opacity wave that pulses along the path.
+- **Shade overlay** from `SunPathSubAgent` — route segments colored amber (sun-exposed) → teal (shaded) using NOAA-derived solar elevation.
+- **Hydration / shade beacons** at every suggested rest break — pulsing vertical beams selectable to surface Street View previews.
+- **Google Photorealistic 3D Tiles floor** when a `gmpKey` URL param is supplied — renders a coffee-table-sized chunk of the actual neighborhood under the route projection via [3d-tiles-renderer](https://github.com/NASA-AMMOS/3DTilesRendererJS) + [Google Map Tiles API](https://developers.google.com/maps/documentation/tile/3d-tiles).
+- **Webcam passthrough background** — `navigator.mediaDevices.getUserMedia({ facingMode: 'environment' })` paints the real environment on a far-back plane so the HUD floats over reality on desktop. AR headsets handle passthrough natively.
+- **Live Watch panel** that hot-updates the wet-bulb readout via `postMessage` ticks from the dashboard.
+- **Transient-failure shield** — a narrow `window.error` allowlist suppresses the cosmetic xrblocks simulator crash that fires after CDN drop-outs (see [src/lib/observability/](src/lib/observability/) for the live monitoring story; the shield is in xr.html itself).
+
+URL params: `verdict`, `headline`, `reasoning`, `wetBulb`, `flag`, `spatial` (JSON), `stops` (JSON), `breaks` (JSON), `watch` (`0`/`1`), `gmpKey` (optional, enables 3D Tiles). The dashboard's `Launch spatial xr 3D` button builds this URL from the current `PlanResult`.
 
 ---
 
@@ -140,7 +145,7 @@ npm run dev            # http://localhost:3000
 ```
 
 Optional env:
-- `GOOGLE_MAPS_PLATFORM_KEY` — unlocks live Directions polylines + the Google Maps embed (otherwise falls back to Leaflet/OSM).
+- `GOOGLE_MAPS_PLATFORM_KEY` — unlocks **three** Maps features at once: the live Google Maps embed on the dashboard (falls back to Leaflet/OSM), the live Directions API polyline in `RouteDirectionsSubAgent` (falls back to straight-line interpolation), and the Google Photorealistic 3D Tiles floor in the WebXR scene (falls back to a flat satellite plane). The dashboard forwards this key to `xr.html` via the `gmpKey` URL param.
 
 API surface:
 - `POST /api/plan { location, activity, time }` → live managed-agents run
@@ -149,6 +154,21 @@ API surface:
 - `GET /api/replay/:runId` → cached McpTape PlanResult
 - `GET /api/trace/:runId` → PlatAtlas span tree
 - `GET /api/runs` → list of recorded runs
+- `GET /api/weather?lat=&lng=` → raw NWS → Open-Meteo cascade output (debugging)
+
+---
+
+## Production deploy
+
+Deployed on Vercel as a serverless function. The architecture matches local dev but with one extra layer of indirection so the Express app can serve both:
+
+- [src/server/createApp.ts](src/server/createApp.ts) — pure Express factory. Registers every `/api/*` route. No `app.listen`, no Vite middleware.
+- [server.ts](server.ts) — dev wrapper. Wraps `createApp()` in Vite middleware and `listen(:3000)`. Used by `npm run dev` only.
+- [api/index.ts](api/index.ts) — Vercel function entry. Five lines: `createApp()` → default export.
+- [vercel.json](vercel.json) — rewrites `/api/(.*)` → `/api/index` so every endpoint funnels through one cold-start, sharing the Gemini client + McpTape cache. `includeFiles: mcp-traces/**` ships baked-in recordings with the deploy so McpReplay still works without a live API call.
+- [.github/workflows/deploy.yml](.github/workflows/deploy.yml) — runs `vercel pull → build → deploy` on every push to main (production) and every PR (preview). Requires repo secrets `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`.
+
+See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the full deploy + secrets + safety-net runbook.
 
 ---
 
