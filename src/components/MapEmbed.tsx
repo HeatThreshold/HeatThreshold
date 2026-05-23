@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { SpatialData, CoolingStop } from '../lib/types';
 import { MapPin, Navigation, Info, Lock } from 'lucide-react';
-import { APIProvider, Map, Marker, InfoWindow } from '@vis.gl/react-google-maps';
+import { APIProvider, Map, AdvancedMarker, Pin, InfoWindow, useMap } from '@vis.gl/react-google-maps';
 
 interface MapEmbedProps {
   spatial: SpatialData;
@@ -10,9 +10,7 @@ interface MapEmbedProps {
 
 // Custom hook to draw a polyline on the Google Map
 function RoutePolyline({ points }: { points: Array<{ lat: number; lng: number }> }) {
-  const mapRef = React.useContext((APIProvider as any)._mapContext); 
-  // Safety: standard fallback if context is not exported or different version
-  const map = mapRef?.map || null;
+  const map = useMap();
 
   useEffect(() => {
     if (!map || points.length < 2) return;
@@ -242,6 +240,7 @@ export function MapEmbed({ spatial, coolingStops }: MapEmbedProps) {
           <APIProvider apiKey={gmpApiKey}>
             <div className="w-full h-full z-0">
               <Map
+                mapId={process.env.GOOGLE_MAPS_MAP_ID || 'DEMO_MAP_ID'}
                 defaultCenter={{ lat: spatial.origin.lat, lng: spatial.origin.lng }}
                 defaultZoom={13}
                 gestureHandling="cooperative"
@@ -251,31 +250,34 @@ export function MapEmbed({ spatial, coolingStops }: MapEmbedProps) {
                 className="w-full h-full"
               >
                 {/* Origin Marker */}
-                <Marker 
-                  position={{ lat: spatial.origin.lat, lng: spatial.origin.lng }} 
+                <AdvancedMarker
+                  position={{ lat: spatial.origin.lat, lng: spatial.origin.lng }}
                   title={`[O] ${spatial.origin.label}`}
-                  label="O"
-                />
+                >
+                  <Pin background="#1a73e8" borderColor="#1557b0" glyphColor="#ffffff" glyph="O" />
+                </AdvancedMarker>
 
                 {/* Waypoints */}
                 {spatial.waypoints.map((wp, i) => (
-                  <Marker
+                  <AdvancedMarker
                     key={`wp-${i}`}
                     position={{ lat: wp.lat, lng: wp.lng }}
                     title={`Waypoint ${i + 1}: ${wp.label}`}
-                    label={(i + 1).toString()}
-                  />
+                  >
+                    <Pin glyph={(i + 1).toString()} />
+                  </AdvancedMarker>
                 ))}
 
                 {/* Cooling Stops */}
-                {coolingStops.map((stop, i) => (
-                  <Marker
+                {coolingStops.map((stop) => (
+                  <AdvancedMarker
                     key={`stop-${stop.placeId}`}
                     position={{ lat: stop.lat, lng: stop.lng }}
                     title={`[✚] ${stop.name}`}
-                    label="+"
                     onClick={() => setSelectedStop(stop)}
-                  />
+                  >
+                    <Pin background="#10b981" borderColor="#059669" glyphColor="#ffffff" glyph="+" />
+                  </AdvancedMarker>
                 ))}
 
                 {selectedStop && (
