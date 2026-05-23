@@ -118,12 +118,31 @@ function Dashboard() {
 
     const tick = async () => {
       try {
+        // Slim the POST body to ONLY the fields runWatchTick reads. Sending the
+        // full PlanResult includes the PlatAtlas span tree, directionsPath
+        // (hundreds of points), navigationArrows, sunSamples, and grounding
+        // chunks — easily a few MB, which trips Vercel's serverless function
+        // body limit and 500s. The endpoint only needs spatial.origin +
+        // verdict/flag/headline/reasoning to compute the next tick.
+        const minimalPlan = {
+          spatial: { origin: currentPlan.spatial.origin },
+          verdict: currentPlan.verdict,
+          flag: currentPlan.flag,
+          headline: currentPlan.headline,
+          reasoning: currentPlan.reasoning,
+          wetBulbPeakF: currentPlan.wetBulbPeakF
+        };
         const res = await fetch('/api/watch/tick', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ plan: currentPlan })
+          body: JSON.stringify({ plan: minimalPlan })
         });
-        if (!res.ok) throw new Error(`tick ${res.status}`);
+        if (!res.ok) {
+          let detail = '';
+          try { detail = (await res.json())?.error || ''; }
+          catch { try { detail = (await res.text()).slice(0, 200); } catch {} }
+          throw new Error(`tick ${res.status}${detail ? `: ${detail}` : ''}`);
+        }
         const data = await res.json();
         if (cancelled) return;
 
@@ -386,8 +405,18 @@ function Dashboard() {
               <span className="text-[9px] uppercase text-slate-400 font-bold tracking-widest font-mono">Managed Status</span>
               <div className="flex items-center gap-2 mt-0.5">
                 <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></div>
-                <span className="text-xs font-mono font-semibold text-slate-700">
-                  {currentPlan.agentTrace?.length || 9} Sub-Agents Active
+                <span className="text-xs font-mono font-semibold text-slate-700" title="3 managed Gemini 3.5 Flash agents (Location, Place, Synthesis) + 7 deterministic sub-agents (Weather cascade, RouteDirections, RouteOptimization, NavigationArrows, SunPath, RefugeBreak, StreetViewPano).">
+                  10 Sub-Agents
+                  {selectedPreset && (
+                    <span className="ml-1 text-[9px] font-mono uppercase text-slate-400 normal-case tracking-tight">
+                      ({currentPlan.agentTrace?.length || 0} traced · preset)
+                    </span>
+                  )}
+                  {!selectedPreset && currentPlan.agentTrace?.length ? (
+                    <span className="ml-1 text-[9px] font-mono uppercase text-emerald-700 normal-case tracking-tight">
+                      ({currentPlan.agentTrace.length} traced · live)
+                    </span>
+                  ) : null}
                 </span>
               </div>
               {lastTickAt && (
