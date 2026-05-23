@@ -208,6 +208,7 @@ grep -RIn "medical\|diagnosis\|symptoms\|treatment\|illness" src/ \
 - **Multi-modal shade assessment**: a `assessShadeCoverage` per-interaction tool on `threshold-place-subagent` that runs Gemini 3.5 Flash Vision on a user-uploaded photo of the route to confirm or refute the `SunPathSubAgent` heuristic.
 - **Historical comparison** via Open-Meteo's climate archive: *"Today's wet-bulb is 7°F above the 10-year mean for this date in this city."*
 - **Calendar ICS export**: "Add this delay window to your calendar."
+- **Migrate `DirectionsService` → `google.maps.routes.Route.computeRoutes`** (deprecated Feb 25, 2026 with a 12+ month sunset window). The new Routes API also exposes per-segment toll/traffic data we don't surface today. See [migration guide](https://developers.google.com/maps/documentation/javascript/routes/routes-js-migration).
 
 ---
 

@@ -8,11 +8,30 @@ import { listRecordings } from '../lib/observability/mcptape';
 
 export function createApp() {
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: '256kb' }));
 
   app.use((req, _res, next) => {
     console.log(`[Server] ${req.method} ${req.url}`);
     next();
+  });
+
+  // Health probe — touches none of the orchestrator imports so it's a clean
+  // signal of "function loads + serves traffic." If /api/health is 200 but
+  // /api/plan or /api/watch/tick are 500, the bug is in the request handler,
+  // not in module loading.
+  app.get('/api/health', (_req, res) => {
+    res.json({
+      ok: true,
+      now: new Date().toISOString(),
+      node: process.version,
+      uptime: process.uptime(),
+      env: {
+        hasGeminiKey: !!process.env.GEMINI_API_KEY,
+        hasGoogleMapsKey: !!process.env.GOOGLE_MAPS_PLATFORM_KEY,
+        hasBlobToken: !!process.env.BLOB_READ_WRITE_TOKEN,
+        vercel: !!process.env.VERCEL
+      }
+    });
   });
 
   app.get('/api/weather', async (req, res) => {
@@ -56,8 +75,10 @@ export function createApp() {
       res.json(plan);
     } catch (err: any) {
       console.error('[Server Error] /api/plan error:', err);
-      res.status(550).json({
-        error: err.message || 'Critical model computation failure',
+      res.status(500).json({
+        error: err?.message || String(err) || 'Critical model computation failure',
+        name: err?.name,
+        stack: err?.stack?.split('\n').slice(0, 8).join('\n'),
         traceback: 'Agent compilation error. Standard fallback recommended.'
       });
     }
@@ -77,12 +98,23 @@ export function createApp() {
     if (!prev || !prev.spatial?.origin) {
       return res.status(400).json({ error: 'Watch tick requires { plan } with spatial.origin.' });
     }
+    if (typeof prev.spatial.origin.lat !== 'number' || typeof prev.spatial.origin.lng !== 'number') {
+      return res.status(400).json({
+        error: `Invalid spatial.origin coords: lat=${prev.spatial.origin.lat} lng=${prev.spatial.origin.lng}`
+      });
+    }
     try {
       const tick = await runWatchTick(prev);
       res.json(tick);
     } catch (err: any) {
       console.error('[Watch] Tick failed:', err);
-      res.status(500).json({ error: err.message || 'Watch tick failed' });
+      // Surface the actual error message + stack to the client so the next
+      // failure shows up in the browser console instead of "tick 500".
+      res.status(500).json({
+        error: err?.message || String(err) || 'Watch tick failed',
+        name: err?.name,
+        stack: err?.stack?.split('\n').slice(0, 5).join('\n')
+      });
     }
   });
 
