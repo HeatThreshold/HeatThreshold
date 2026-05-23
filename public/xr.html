@@ -450,22 +450,31 @@
         }
 
         // ------------------------------------------------------------------------------------
-        // Live activity mode — geolocation-driven beacon + nearest-break readout
+        // Live activity mode — geolocation beacon + current/projected heat readout
         // ------------------------------------------------------------------------------------
         buildLiveStatusPanel() {
           this.livePanel = new xb.SpatialPanel({
-            width: 1.1, height: 0.22, backgroundColor: '#0f172af2', useDefaultPosition: false
+            width: 1.2, height: 0.4, backgroundColor: '#0f172af2', useDefaultPosition: false
           });
           const grid = this.livePanel.addGrid();
-          grid.addRow({ weight: 0.45 }).addText({
+          grid.addRow({ weight: 0.22 }).addText({
             text: '● LIVE ACTIVITY MODE',
-            fontColor: '#ea4335', fontSize: 0.04, textAlign: 'center'
+            fontColor: '#ea4335', fontSize: 0.038, textAlign: 'center'
           });
-          this.liveStatusText = grid.addRow({ weight: 0.55 }).addText({
+          this.liveStatusText = grid.addRow({ weight: 0.3 }).addText({
             text: 'Requesting GPS permission…',
-            fontColor: '#ffffff', fontSize: 0.028, textAlign: 'center'
+            fontColor: '#ffffff', fontSize: 0.032, textAlign: 'center'
           });
-          this.livePanel.position.set(0, 1.9, -1.6);
+          // Two-line readout: current conditions, then projected at next refuge.
+          this.liveNowText = grid.addRow({ weight: 0.24 }).addText({
+            text: '',
+            fontColor: '#cbd5e1', fontSize: 0.028, textAlign: 'center'
+          });
+          this.liveProjectionText = grid.addRow({ weight: 0.24 }).addText({
+            text: '',
+            fontColor: '#94a3b8', fontSize: 0.026, textAlign: 'center'
+          });
+          this.livePanel.position.set(0, 1.95, -1.6);
           this.add(this.livePanel);
         }
 
@@ -491,7 +500,7 @@
 
         placeLiveBeacon(lat, lng, accuracyM) {
           if (!projector) return;
-          // Project the user's GPS into the routeGroup local frame.
+          // Project the user's GPS into the routeGroup local frame for the visual.
           const pos = (function () {
             const dx = (lng - projector.lng0) * projector.lngToX;
             const dz = (lat - projector.lat0) * projector.latToZ;
@@ -502,6 +511,7 @@
             );
           })();
 
+          // Lazily build beacon meshes on first GPS lock.
           if (!this.liveBeacon) {
             const orb = new THREE.Mesh(
               new THREE.SphereGeometry(0.05, 24, 12),
@@ -521,31 +531,98 @@
           }
           this.liveBeacon.orb.position.copy(pos).setY(0.06);
           this.liveBeacon.ring.position.copy(pos).setY(0.01);
+          this.liveLastFix = { lat, lng, accuracyM, at: Date.now() };
 
-          // Find nearest break (or refuge) for the readout
-          const all = [];
-          for (const { orb, breakSpec } of this.breakBeacons) {
-            all.push({ pos: orb.position, label: orb.userData.label, kind: 'break', spec: breakSpec });
+          this.refreshLiveReadout();
+        }
+
+        // Refreshes the heat readout. Called on every GPS fix AND on every
+        // applyLiveTick() so the panel stays current even if the user is
+        // standing still while the wet-bulb climbs.
+        refreshLiveReadout() {
+          if (!this.liveLastFix) return;
+          const { lat, lng, accuracyM } = this.liveLastFix;
+
+          // ---- Current conditions: project wet-bulb at the wall clock now ----
+          const nowD = new Date();
+          const nowMinutes = nowD.getHours() * 60 + nowD.getMinutes();
+          const currentWetBulb = projectWetBulbAt(nowMinutes);
+          const currentFlag = flagForWetBulb(currentWetBulb);
+          const currentFlagInfo = flagColors[currentFlag] || flagColors.white;
+
+          // Color the ring under the beacon by the CURRENT flag.
+          if (this.liveBeacon?.ring?.material) {
+            this.liveBeacon.ring.material.color.setHex(currentFlagInfo.hex);
           }
-          for (const node of this.routeNodes) {
-            if (node.userData.type === 'coolingStop') {
-              all.push({ pos: node.position, label: node.userData.label, kind: 'refuge' });
+
+          // ---- Find nearest refuge (real meters via haversine) ---------------
+          const refugePool = [
+            ...coolingStops.map(s => ({ lat: s.lat, lng: s.lng, label: s.name, kind: 'refuge' })),
+            ...suggestedBreaks.map((b, i) => ({
+              lat: b.lat, lng: b.lng,
+              label: this.breakBeacons[i]?.orb?.userData?.label || `Break ${i + 1}`,
+              kind: 'break'
+            }))
+          ];
+          let nearest = null;
+          let nearestMeters = Infinity;
+          for (const r of refugePool) {
+            const d = haversineMetersLatLng({ lat, lng }, { lat: r.lat, lng: r.lng });
+            if (d < nearestMeters) { nearestMeters = d; nearest = r; }
+          }
+
+          // ---- Projected conditions at ETA on the nearest refuge -------------
+          let projected = null;
+          if (nearest) {
+            const etaMinutesFromNow = nearestMeters / PACE_MPS / 60;
+            const etaAbsoluteMinutes = nowMinutes + etaMinutesFromNow;
+            const etaWetBulb = projectWetBulbAt(etaAbsoluteMinutes);
+            const etaFlag = flagForWetBulb(etaWetBulb);
+            projected = {
+              label: nearest.label,
+              meters: Math.round(nearestMeters),
+              etaClock: formatMinutesToClock(etaAbsoluteMinutes),
+              etaMin: Math.round(etaMinutesFromNow),
+              wetBulb: etaWetBulb,
+              flag: etaFlag,
+              flagHex: (flagColors[etaFlag] || flagColors.white).hex
+            };
+          }
+
+          // ---- Update the panel text -----------------------------------------
+          this.liveStatusText?.setText?.(
+            `GPS locked (±${Math.round(accuracyM)}m)`
+          );
+          this.liveNowText?.setText?.(
+            `NOW · ${currentWetBulb}°F WBGT · ${currentFlag.toUpperCase()} FLAG`
+          );
+          if (projected) {
+            const distStr = projected.meters >= 1000
+              ? `${(projected.meters / 1000).toFixed(2)} km`
+              : `${projected.meters} m`;
+            this.liveProjectionText?.setText?.(
+              `↗ ${projected.label}: ${distStr}, ETA ${projected.etaClock} (${projected.etaMin}min) · ${projected.wetBulb}°F ${projected.flag.toUpperCase()}`
+            );
+          } else {
+            this.liveProjectionText?.setText?.('No refuges loaded for this route.');
+          }
+
+          // ---- Voice alert when entering yellow/red/black -------------------
+          if (currentFlag !== this.liveLastFlag && this.liveLastFlag != null) {
+            const escalating = ['white', 'green', 'yellow', 'red', 'black'].indexOf(currentFlag)
+                             > ['white', 'green', 'yellow', 'red', 'black'].indexOf(this.liveLastFlag);
+            if (escalating && (currentFlag === 'yellow' || currentFlag === 'red' || currentFlag === 'black')) {
+              const msg = `Heat alert. Conditions have risen to ${currentFlag} flag, ${currentWetBulb} degrees wet bulb. ${projected ? `Nearest refuge ${projected.label}, ${projected.meters} meters away.` : ''}`;
+              try {
+                if (xb.core.sound.speechSynthesizer) {
+                  xb.core.sound.speechSynthesizer.speak(msg);
+                } else if (window.speechSynthesis) {
+                  window.speechSynthesis.speak(new SpeechSynthesisUtterance(msg));
+                }
+              } catch { /* ignore */ }
             }
           }
-          let best = null;
-          let bestD = Infinity;
-          for (const a of all) {
-            const d = pos.distanceTo(a.pos);
-            if (d < bestD) { bestD = d; best = a; }
-          }
-          // Distance is in local scene units (~1 unit ≈ maxSpan meters of the
-          // original projection). We don't have the inverse — approximate by
-          // showing local distance + GPS accuracy so the user has a feel.
-          const approxMeters = Math.round(bestD * 1000);
-          const msg = best
-            ? `Next refuge: ${best.label}\n~${approxMeters}m on map (GPS ±${Math.round(accuracyM)}m)`
-            : `GPS locked (±${Math.round(accuracyM)}m). No refuges loaded.`;
-          this.liveStatusText?.setText?.(msg);
+          this.liveLastFlag = currentFlag;
         }
 
         // ------------------------------------------------------------------------------------
@@ -1077,6 +1154,10 @@
               `Verdict: ${verdict.toUpperCase()}\n${headline}\nAnalysis: ${reasoning}\n\n💧 ${suggestedBreaks.length} rest beacons · 🧭 ${(spatialData.navigationArrows || []).length} ground arrows`
             );
           }
+          // Live Activity mode: re-run the heat readout so the projected
+          // wet-bulb refreshes against the new peak even if the user hasn't moved.
+          if (xrMode === 'live') this.refreshLiveReadout();
+
           if (this.watchStatusText?.setText) {
             const at = new Date(tick.fetchedAt || Date.now()).toLocaleTimeString();
             this.watchStatusText.setText(`Tick @ ${at} · WBGT ${wetBulb}°F · ${flagRule.toUpperCase()}`);
@@ -1173,6 +1254,13 @@
               const pulse = 1.0 + 0.25 * Math.sin(this.animationTime * 4.0);
               this.liveBeacon.orb.scale.setScalar(pulse);
               this.liveBeacon.ring.scale.setScalar(pulse * 1.15);
+            }
+            // Clock-driven refresh: re-evaluate the "NOW" projection every
+            // 15 seconds so the wet-bulb readout drifts forward as time
+            // passes even if the user is standing still and Live Watch is off.
+            if (this.liveLastFix && (this.animationTime - (this.liveLastRefreshAt || 0)) > 15) {
+              this.liveLastRefreshAt = this.animationTime;
+              this.refreshLiveReadout();
             }
           } else {
             this.routeGroup.rotation.y = 0.05 * Math.sin(this.animationTime * 0.2);
