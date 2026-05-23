@@ -1,11 +1,19 @@
 import { calculateWetBulbFahrenheit } from './wetbulb';
 
+export type WeatherSource = 'nws' | 'open-meteo' | 'simulated';
+
 export interface HourlyForecast {
   time: string; // ISO string
   temperatureF: number;
   relativeHumidity: number; // 0 - 100
   wetBulbF: number;
 }
+
+/**
+ * Reports which data source actually satisfied the most recent
+ * getHourlyForecasts call for a given coordinate. Updated as a side effect.
+ */
+export const lastWeatherSource = new Map<string, WeatherSource>();
 
 // Simple in-memory cache
 const weatherCache = new Map<string, { timestamp: number; data: HourlyForecast[] }>();
@@ -43,19 +51,26 @@ export async function getHourlyForecasts(lat: number, lng: number): Promise<Hour
   try {
     const forecasts = await tryNWS(lat, lng);
     weatherCache.set(cacheKey, { timestamp: now, data: forecasts });
+    lastWeatherSource.set(cacheKey, 'nws');
     return forecasts;
   } catch (nwsError) {
     console.warn('[WeatherService] NWS query failed or timed out. Falling back to Open-Meteo.', nwsError);
     try {
       const forecasts = await fetchOpenMeteo(lat, lng);
       weatherCache.set(cacheKey, { timestamp: now, data: forecasts });
+      lastWeatherSource.set(cacheKey, 'open-meteo');
       return forecasts;
     } catch (meteoError) {
       console.warn('[WeatherService] Open-Meteo grid query failed or timed out. Generating simulated plausible baseline weather.', meteoError);
       const mockResult = generatePlausibleForecasts(lat);
+      lastWeatherSource.set(cacheKey, 'simulated');
       return mockResult;
     }
   }
+}
+
+export function getLastWeatherSource(lat: number, lng: number): WeatherSource {
+  return lastWeatherSource.get(`${lat.toFixed(4)},${lng.toFixed(4)}`) || 'simulated';
 }
 
 async function tryNWS(lat: number, lng: number): Promise<HourlyForecast[]> {
