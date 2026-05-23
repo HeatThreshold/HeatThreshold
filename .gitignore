@@ -12,8 +12,9 @@ mcp-traces/*-mcp.jsonl
 mcp-traces/*-mcp-server.jsonl
 .vercel
 
-# Vercel function build artifact — produced by the vercel.json buildCommand
-# step that bundles api-src/handler.ts into a self-contained CJS module.
-# Vercel deploys api/index.js directly; the source lives in api-src/.
-api/index.js
+# Vercel function build artifact — the bundled api/index.js is committed
+# as a placeholder (vercel.json's `functions` config is parsed BEFORE the
+# buildCommand runs, so the file must exist at deploy time). esbuild
+# overwrites the placeholder during deploy with the real handler. The
+# sourcemap is purely a build artifact and stays ignored.
 api/index.js.map
