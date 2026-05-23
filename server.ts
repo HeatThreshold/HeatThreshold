@@ -1,9 +1,10 @@
 import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
-import { runOrchestrationGraph } from './src/lib/agents/orchestrator';
+import { runOrchestrationGraph, runWatchTick } from './src/lib/agents/orchestrator';
 import { getHourlyForecasts } from './src/lib/weatherService';
 import { demoFixtures } from './src/lib/demoFixtures';
+import { PlanResult } from './src/lib/types';
 import dotenv from 'dotenv';
 
 // Load environmental variables safely
@@ -80,6 +81,23 @@ async function startServer() {
       return res.json(demoFixtures[demoId]);
     }
     return res.status(400).json({ error: 'GET requests only allowed for demo queries.' });
+  });
+
+  // 4. API: Live Watch tick — single-shot re-evaluation of weather/flag/verdict
+  // for an already-resolved plan. The client polls this on an interval to
+  // power "live watch mode" without re-paying the geocoding + grounding cost.
+  app.post('/api/watch/tick', async (req, res) => {
+    const prev: PlanResult | undefined = req.body?.plan;
+    if (!prev || !prev.spatial?.origin) {
+      return res.status(400).json({ error: 'Watch tick requires { plan } with spatial.origin.' });
+    }
+    try {
+      const tick = await runWatchTick(prev);
+      res.json(tick);
+    } catch (err: any) {
+      console.error('[Watch] Tick failed:', err);
+      res.status(500).json({ error: err.message || 'Watch tick failed' });
+    }
   });
 
   // 4. Vite Dev Integration or Standalone Production Servicing

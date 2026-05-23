@@ -2,16 +2,16 @@ import React, { useState, useEffect } from 'react';
 import { demoFixtures } from './lib/demoFixtures';
 import { PlanResult } from './lib/types';
 import { MapEmbed } from './components/MapEmbed';
-import { 
-  Compass, 
-  MapPin, 
-  Activity, 
-  Clock, 
-  ShieldAlert, 
-  ShieldCheck, 
-  Cpu, 
-  ArrowRight, 
-  Search, 
+import {
+  Compass,
+  MapPin,
+  Activity,
+  Clock,
+  ShieldAlert,
+  ShieldCheck,
+  Cpu,
+  ArrowRight,
+  Search,
   ExternalLink,
   ChevronRight,
   Info,
@@ -23,7 +23,9 @@ import {
   CheckCircle,
   Clock3,
   Calendar,
-  AlertTriangle
+  AlertTriangle,
+  Radio,
+  Pause
 } from 'lucide-react';
 
 export default function App() {
@@ -43,6 +45,12 @@ export default function App() {
   const [dateState, setDateState] = useState('May 23, 2026');
   const [hoveredHourIndex, setHoveredHourIndex] = useState<number | null>(null);
 
+  // Live Watch state — periodic re-evaluation via /api/watch/tick.
+  const [isWatching, setIsWatching] = useState(false);
+  const [lastTickAt, setLastTickAt] = useState<string | null>(null);
+  const [lastTickSource, setLastTickSource] = useState<'nws' | 'open-meteo' | 'simulated' | null>(null);
+  const xrIframeRef = React.useRef<HTMLIFrameElement | null>(null);
+
   // Dynamic system clock simulator matching the user's local metadata date
   useEffect(() => {
     const updateTime = () => {
@@ -58,6 +66,64 @@ export default function App() {
     const interval = setInterval(updateTime, 1000);
     return () => clearInterval(interval);
   }, []);
+
+  // Live Watch polling — re-evaluates weather/flag/verdict every 60s while on
+  // and broadcasts the freshest plan into the XR iframe via postMessage so the
+  // 3D scene reflects rising wet-bulb in real time.
+  useEffect(() => {
+    if (!isWatching) return;
+    let cancelled = false;
+
+    const tick = async () => {
+      try {
+        const res = await fetch('/api/watch/tick', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ plan: currentPlan })
+        });
+        if (!res.ok) throw new Error(`tick ${res.status}`);
+        const data = await res.json();
+        if (cancelled) return;
+
+        setCurrentPlan(prev => ({
+          ...prev,
+          wetBulbPeakF: data.wetBulbPeakF,
+          flag: data.flag,
+          verdict: data.verdict,
+          headline: data.headline,
+          reasoning: data.reasoning
+        }));
+        setLastTickAt(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+        setLastTickSource(data.source);
+
+        // Push the same delta to the XR iframe if it's mounted.
+        const iframe = xrIframeRef.current;
+        if (iframe?.contentWindow) {
+          iframe.contentWindow.postMessage(
+            {
+              kind: 'heat-threshold/live-tick',
+              wetBulb: data.wetBulbPeakF,
+              flag: data.flag,
+              verdict: data.verdict,
+              headline: data.headline,
+              reasoning: data.reasoning,
+              fetchedAt: data.fetchedAt
+            },
+            '*'
+          );
+        }
+      } catch (err) {
+        console.warn('[LiveWatch] Tick failed', err);
+      }
+    };
+
+    tick();
+    const id = setInterval(tick, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [isWatching, currentPlan.id, currentPlan.spatial?.origin?.lat, currentPlan.spatial?.origin?.lng]);
 
   // Handle preset selector changes
   const handleLoadPreset = (key: string) => {
@@ -249,12 +315,44 @@ export default function App() {
 
           {/* Live System Specs */}
           <div className="flex flex-wrap items-center gap-4 md:gap-6 text-xs shrink-0">
+            <button
+              onClick={() => setIsWatching(w => !w)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-[10px] font-mono font-bold uppercase tracking-widest transition-all cursor-pointer ${
+                isWatching
+                  ? 'bg-[#34A853]/15 border-[#34A853]/55 text-[#137333] shadow-sm'
+                  : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+              }`}
+              title={isWatching ? 'Live Watch ON — polls /api/watch/tick every 60s' : 'Enable Live Watch'}
+            >
+              {isWatching ? (
+                <>
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#34A853] opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-[#34A853]"></span>
+                  </span>
+                  <Radio className="w-3.5 h-3.5" />
+                  Live Watch
+                </>
+              ) : (
+                <>
+                  <Pause className="w-3.5 h-3.5" />
+                  Watch Paused
+                </>
+              )}
+            </button>
             <div className="flex flex-col items-end">
               <span className="text-[9px] uppercase text-slate-400 font-bold tracking-widest font-mono">Managed Status</span>
               <div className="flex items-center gap-2 mt-0.5">
                 <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></div>
-                <span className="text-xs font-mono font-semibold text-slate-700">3 Sub-Agents Active</span>
+                <span className="text-xs font-mono font-semibold text-slate-700">
+                  {currentPlan.agentTrace?.length || 9} Sub-Agents Active
+                </span>
               </div>
+              {lastTickAt && (
+                <span className="text-[9px] font-mono text-slate-500 mt-0.5">
+                  last tick {lastTickAt}{lastTickSource ? ` · ${lastTickSource}` : ''}
+                </span>
+              )}
             </div>
             <div className="hidden md:block h-8 w-[1px] bg-slate-200"></div>
             <div className="text-right">
@@ -852,9 +950,10 @@ export default function App() {
             </p>
 
             {/* Real 3D WebXR and Simulator Experience */}
-            <iframe 
-              src={`/xr.html?verdict=${encodeURIComponent(currentPlan.verdict)}&headline=${encodeURIComponent(currentPlan.headline)}&reasoning=${encodeURIComponent(currentPlan.reasoning)}&wetBulb=${currentPlan.wetBulbPeakF}&flag=${currentPlan.flag}&spatial=${encodeURIComponent(JSON.stringify(currentPlan.spatial))}&stops=${encodeURIComponent(JSON.stringify(currentPlan.coolingStops))}`} 
-              className="w-full h-96 md:h-[500px] border border-slate-800 rounded-xl bg-slate-950 mb-4 shadow-inner" 
+            <iframe
+              ref={xrIframeRef}
+              src={`/xr.html?verdict=${encodeURIComponent(currentPlan.verdict)}&headline=${encodeURIComponent(currentPlan.headline)}&reasoning=${encodeURIComponent(currentPlan.reasoning)}&wetBulb=${currentPlan.wetBulbPeakF}&flag=${currentPlan.flag}&spatial=${encodeURIComponent(JSON.stringify(currentPlan.spatial))}&stops=${encodeURIComponent(JSON.stringify(currentPlan.coolingStops))}&breaks=${encodeURIComponent(JSON.stringify(currentPlan.suggestedBreaks || []))}&watch=${isWatching ? '1' : '0'}`}
+              className="w-full h-96 md:h-[500px] border border-slate-800 rounded-xl bg-slate-950 mb-4 shadow-inner"
               title="Spatial XR Immersive Timeline HUD"
               allow="camera; microphone; geolocation"
             />
