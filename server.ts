@@ -5,6 +5,8 @@ import { runOrchestrationGraph, runWatchTick } from './src/lib/agents/orchestrat
 import { getHourlyForecasts } from './src/lib/weatherService';
 import { demoFixtures } from './src/lib/demoFixtures';
 import { PlanResult } from './src/lib/types';
+import { loadRecording } from './src/lib/observability/mcpreplay';
+import { listRecordings } from './src/lib/observability/mcptape';
 import dotenv from 'dotenv';
 
 // Load environmental variables safely
@@ -100,6 +102,40 @@ async function startServer() {
     }
   });
 
+  // 5. McpReplay: deterministic playback of a recorded managed-agents run.
+  // The demo safety net — same code path, cached LLM responses.
+  app.get('/api/replay/:runId', async (req, res) => {
+    const { runId } = req.params;
+    const recording = await loadRecording(runId);
+    if (!recording) {
+      return res.status(404).json({ error: `No McpTape recording found for runId: ${runId}` });
+    }
+    res.setHeader('x-threshold-source', 'mcp-replay');
+    res.json({ ...recording.result, replayedFrom: recording.runId });
+  });
+
+  // 6. PlatAtlas: span tree viewer endpoint for /trace/:runId page.
+  app.get('/api/trace/:runId', async (req, res) => {
+    const { runId } = req.params;
+    const recording = await loadRecording(runId);
+    if (!recording) {
+      return res.status(404).json({ error: `No PlatAtlas trace found for runId: ${runId}` });
+    }
+    res.json({
+      runId: recording.runId,
+      recordedAt: recording.recordedAt,
+      request: recording.request,
+      spans: recording.spans,
+      result: recording.result
+    });
+  });
+
+  // 7. McpTape: list available recordings (for the trace index).
+  app.get('/api/runs', async (_req, res) => {
+    const runs = await listRecordings();
+    res.json({ runs });
+  });
+
   // 4. Vite Dev Integration or Standalone Production Servicing
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
@@ -118,7 +154,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Server] Heat Threshold running on http://0.0.0.0:${PORT}`);
+    console.log(`[Server] Heat Threshold running on http://localhost:${PORT}`);
   });
 }
 

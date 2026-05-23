@@ -9,6 +9,8 @@ import {
 } from '../types';
 import { getHourlyForecasts, getLastWeatherSource } from '../weatherService';
 import { getFlagForWetBulb } from '../flags';
+import { PlatAtlasRecorder } from '../observability/platatlas';
+import { recordRun } from '../observability/mcptape';
 
 // Lazy-loaded Gemini client safely avoiding crashes on module load
 let aiClientInstance: GoogleGenAI | null = null;
@@ -814,11 +816,23 @@ export async function runOrchestrationGraph(
   time: string
 ): Promise<PlanResult> {
   const agentTrace: AgentTraceItem[] = [];
+  const recorder = new PlatAtlasRecorder();
+  recorder.snapshot().attributes = {
+    ...recorder.snapshot().attributes,
+    location,
+    activity,
+    time
+  };
 
   try {
     // 1. Resolve Location Coordinates using Gemini 3.5 Flash
     agentTrace.push({ agentName: 'LocationResolutionSubAgent', status: 'running', durationMs: 0 });
-    const { data: routeInfo, durationMs: geoDuration } = await resolveLocationWithAI(location, activity);
+    const { data: routeInfo, durationMs: geoDuration } = await recorder.withSpan(
+      'LocationResolutionSubAgent',
+      { model: 'gemini-3.5-flash', tool: 'structured-output' },
+      () => resolveLocationWithAI(location, activity),
+      r => `lat=${r.data.lat.toFixed(4)} lng=${r.data.lng.toFixed(4)} waypoints=${r.data.waypoints.length}`
+    );
 
     agentTrace[0].status = 'success';
     agentTrace[0].durationMs = geoDuration;
@@ -827,7 +841,12 @@ export async function runOrchestrationGraph(
     // 2. WeatherSubAgent: Retrieve meteo profile (NWS -> Open-Meteo cascade)
     const weatherStart = Date.now();
     agentTrace.push({ agentName: 'WeatherSubAgent', status: 'running', durationMs: 0 });
-    const forecasts = await getHourlyForecasts(routeInfo.lat, routeInfo.lng);
+    const forecasts = await recorder.withSpan(
+      'WeatherSubAgent',
+      { tool: 'getHourlyHeatPoints', cascade: 'nws->open-meteo->simulated' },
+      () => getHourlyForecasts(routeInfo.lat, routeInfo.lng),
+      f => `${f.length} hours; peakF=${Math.max(...f.map(x => x.temperatureF))}; source=${getLastWeatherSource(routeInfo.lat, routeInfo.lng)}`
+    );
     const weatherDuration = Date.now() - weatherStart;
 
     const weatherSource = getLastWeatherSource(routeInfo.lat, routeInfo.lng);
@@ -843,11 +862,17 @@ export async function runOrchestrationGraph(
 
     // 3. PlaceSubAgent: Locate refuge stops in parallel (Using real Google Maps Grounding!)
     agentTrace.push({ agentName: 'PlaceSubAgent', status: 'running', durationMs: 0 });
-    const { data: stops, groundingChunks, durationMs: placeDuration } = await getCoolingStopsWithAI(
-      routeInfo.lat,
-      routeInfo.lng,
-      routeInfo.resolvedLabel,
-      activity
+    const { data: stops, groundingChunks, durationMs: placeDuration } = await recorder.withSpan(
+      'PlaceSubAgent',
+      { model: 'gemini-3.5-flash', tool: 'google-maps-grounding' },
+      () =>
+        getCoolingStopsWithAI(
+          routeInfo.lat,
+          routeInfo.lng,
+          routeInfo.resolvedLabel,
+          activity
+        ),
+      r => `${r.data.length} stops · ${r.groundingChunks.length} grounding chunks`
     );
 
     agentTrace[2].status = 'success';
@@ -856,13 +881,12 @@ export async function runOrchestrationGraph(
 
     // 4. SynthesisSubAgent: Serial consolidation
     agentTrace.push({ agentName: 'SynthesisSubAgent', status: 'running', durationMs: 0 });
-    const { data: synthesis, durationMs: synthDuration } = await synthesizeSchedulePlanWithAI(
-      location,
-      activity,
-      time,
-      routeInfo,
-      forecasts,
-      stops
+    const { data: synthesis, durationMs: synthDuration } = await recorder.withSpan(
+      'SynthesisSubAgent',
+      { model: 'gemini-3.5-flash', tool: 'structured-output', schema: 'PlanOutput' },
+      () =>
+        synthesizeSchedulePlanWithAI(location, activity, time, routeInfo, forecasts, stops),
+      r => `verdict=${r.data.verdict} flag=${r.data.flag} wetBulbPeakF=${r.data.wetBulbPeakF}`
     );
 
     agentTrace[3].status = 'success';
@@ -878,10 +902,11 @@ export async function runOrchestrationGraph(
     const dest = waypoints[waypoints.length - 1] || origin;
     const waypointMiddles = waypoints.slice(0, -1);
 
-    const { path: directionsPath, steps: directionSteps, usedLive } = await fetchGoogleDirections(
-      origin,
-      dest,
-      waypointMiddles
+    const { path: directionsPath, steps: directionSteps, usedLive } = await recorder.withSpan(
+      'RouteDirectionsSubAgent',
+      { tool: 'google-maps-directions', mode: 'walking' },
+      () => fetchGoogleDirections(origin, dest, waypointMiddles),
+      r => `live=${r.usedLive} polyline=${r.path.length}pts steps=${r.steps.length}`
     );
     synthesis.spatial.directionsPath = directionsPath;
 
@@ -952,15 +977,28 @@ export async function runOrchestrationGraph(
       outputSummary: `Bound first-person Street View panos to ${1 + waypoints.length} route nodes, ${synthesis.coolingStops.length} refuges, ${suggestedBreaks.length} break beacons (heading-aware).`
     };
 
-    return {
+    const spans = recorder.finalize('success');
+    const result: PlanResult = {
       ...synthesis,
+      id: recorder.runId,
       agentTrace,
+      traceSpans: spans,
       groundingChunks,
       timestamp: new Date().toISOString(),
       request: { location, activity, time }
     };
+
+    // McpTape: persist the full run so /api/replay/:runId can reproduce it
+    // deterministically during the demo. Fire-and-forget — recording failure
+    // should never bubble up to the user.
+    recordRun(result, spans).catch(err =>
+      console.warn('[McpTape] Failed to persist recording for', recorder.runId, err)
+    );
+
+    return result;
   } catch (error: any) {
     console.error('[Orchestrator] Failed end-to-end graph:', error);
+    recorder.finalize('failed');
 
     // Add failed trace marker
     const runningAgent = agentTrace.find(t => t.status === 'running');

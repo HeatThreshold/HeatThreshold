@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { demoFixtures } from './lib/demoFixtures';
 import { PlanResult } from './lib/types';
 import { MapEmbed } from './components/MapEmbed';
+import { TraceViewer } from './components/TraceViewer';
 import {
   Compass,
   MapPin,
@@ -28,7 +29,22 @@ import {
   Pause
 } from 'lucide-react';
 
+/**
+ * Tiny client-side router. /trace/:runId renders the PlatAtlas span tree
+ * viewer; everything else renders the dashboard. Vite SPA fallback in
+ * server.ts catches unknown paths and serves this same index.html.
+ */
 export default function App() {
+  const traceMatch = typeof window !== 'undefined'
+    ? window.location.pathname.match(/^\/trace\/([a-zA-Z0-9_-]+)/)
+    : null;
+  if (traceMatch) {
+    return <TraceViewer runId={traceMatch[1]} />;
+  }
+  return <Dashboard />;
+}
+
+function Dashboard() {
   const [locationInput, setLocationInput] = useState('SF Ferry Building, San Francisco, CA');
   const [activityInput, setActivityInput] = useState('Biking with Coit Tower climb');
   const [timeInput, setTimeInput] = useState('14:30');
@@ -50,6 +66,31 @@ export default function App() {
   const [lastTickAt, setLastTickAt] = useState<string | null>(null);
   const [lastTickSource, setLastTickSource] = useState<'nws' | 'open-meteo' | 'simulated' | null>(null);
   const xrIframeRef = React.useRef<HTMLIFrameElement | null>(null);
+
+  // McpReplay: when the page is opened with ?replay=<runId>, hydrate the
+  // dashboard from a previously recorded run instead of generating a new one.
+  // This is the demo safety net — same UI, cached LLM responses.
+  const [replayBanner, setReplayBanner] = useState<string | null>(null);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const replayId = params.get('replay');
+    if (!replayId) return;
+    fetch(`/api/replay/${encodeURIComponent(replayId)}`)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then((cached: PlanResult) => {
+        setCurrentPlan(cached);
+        setSelectedPreset('');
+        setLocationInput(cached.request.location);
+        setActivityInput(cached.request.activity);
+        setTimeInput(cached.request.time);
+        setReplayBanner(`Replaying McpTape recording ${replayId.slice(0, 8)} — same agent code, cached LLM responses.`);
+      })
+      .catch(err => {
+        console.warn('[McpReplay] Failed to load recording', err);
+        setReplayBanner(`Replay ${replayId.slice(0, 8)} not found — showing live dashboard.`);
+      });
+  }, []);
 
   // Dynamic system clock simulator matching the user's local metadata date
   useEffect(() => {
@@ -414,6 +455,25 @@ export default function App() {
               <p className="text-xs font-semibold text-[#b06000]">Operational Notice</p>
               <p className="text-xs text-[#b06000]/90 mt-0.5">{errorMsg}</p>
             </div>
+          </div>
+        )}
+
+        {/* McpReplay banner: shown when ?replay=<id> hydrated the dashboard */}
+        {replayBanner && (
+          <div className="bg-[#e8f0fe] border border-[#aecbfa] rounded-2xl p-4 flex items-start gap-3 shadow-sm">
+            <Radio className="w-5 h-5 text-[#1a73e8] shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-xs font-bold text-[#1a73e8] uppercase tracking-wider font-mono">McpReplay Active</p>
+              <p className="text-xs text-[#1557b0] mt-0.5 font-medium">{replayBanner}</p>
+            </div>
+            {currentPlan.id && (
+              <a
+                href={`/trace/${currentPlan.id}`}
+                className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-slate-50 text-[#1a73e8] text-[10px] font-bold rounded-lg border border-[#aecbfa] uppercase tracking-tight font-mono"
+              >
+                <ExternalLink className="w-3 h-3" /> View Span Tree
+              </a>
+            )}
           </div>
         )}
 
@@ -869,7 +929,15 @@ export default function App() {
               <h2 className="text-[10px] font-bold uppercase tracking-widest text-[#202124]/40 font-mono flex items-center gap-1">
                 🕵️‍♂️ Agent Activity Trace Logs
               </h2>
-              <div className="flex gap-2">
+              <div className="flex gap-2 items-center">
+                {currentPlan.id && (
+                  <a
+                    href={`/trace/${currentPlan.id}`}
+                    className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-slate-50 hover:bg-slate-100 text-slate-700 rounded-md text-[9px] uppercase font-bold tracking-wider font-mono border border-slate-200"
+                  >
+                    <ExternalLink className="w-2.5 h-2.5" /> Open Span Tree · {currentPlan.id.slice(0, 8)}
+                  </a>
+                )}
                 <div className="px-2.5 py-0.5 bg-[#e8f0fe] text-[#1a73e8] rounded-md text-[9px] uppercase font-bold tracking-wider font-mono border border-[#aecbfa]">
                   Live Feed Connected
                 </div>

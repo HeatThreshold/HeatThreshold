@@ -96,6 +96,10 @@ export interface AgentTraceItem {
 export interface PlanResult extends PlanOutput {
   id?: string;
   agentTrace: AgentTraceItem[];
+  /** PlatAtlas span tree recorded for the run (used by /trace/:runId). */
+  traceSpans?: unknown;
+  /** When this PlanResult was served from a McpTape recording, the runId. */
+  replayedFrom?: string;
   groundingChunks?: any[];
   timestamp: string;
   request: {
