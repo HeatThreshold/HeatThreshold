@@ -7,5 +7,6 @@ coverage/
 .env*
 !.env.example
 .antigravitycli/
+.vercel/
 mcp-traces/*-mcp.jsonl
 mcp-traces/*-mcp-server.jsonl
