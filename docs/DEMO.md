@@ -42,7 +42,19 @@ Back to the dashboard. Hover the wet-bulb sparkline.
 
 > "Peak wet-bulb is computed via Stull (2011), not WBGT. Flag thresholds are USMC 6200.1E for environmental training, not health advice. This is a *scheduling* tool, not a medical one."
 
-### 1:40 – 2:05 — Antigravity (if shipped)
+### 1:40 – 2:05 — Cinematic Preview (headline visual beat)
+
+Click the amber **◆ Cinematic Preview** button in the dashboard's AR/XR card. The XR modal opens in `mode=preview`.
+
+> "This is what your trip actually looks like. The agent walks me forward through the journey one stop at a time — Pier 7 at 2:35 PM, 76 degrees wet-bulb, white flag. Coit Tower base at 2:48, 84, green flag. Crissy Field at 3:12, 88, **red flag.** Each node lights up in its projected flag color at the moment I'd arrive — so I see the heat rising as I'd actually experience it on the route."
+
+What's happening in the scene: each waypoint, refuge, and break beacon cycles into the foreground every ~3s. The mesh color is the projected flag at simulated arrival time (white → green → yellow → red as the simulated clock advances). When the flag steps up, a voice announcement plays. The banner shows: stop name → cumulative distance + time-from-start → arrival clock + projected wet-bulb + flag.
+
+Pace-aware: if the activity string contains "bike/biking/cycling", pace is 4.5 m/s; otherwise 1.35 m/s (walking).
+
+(Skip this beat if you only have 90 seconds total.)
+
+### 2:05 – 2:20 — Antigravity (if shipped, otherwise cut)
 
 Switch to the Antigravity IDE chat. Run `/threshold-plan bike to Zilker at 1pm`.
 
@@ -51,6 +63,8 @@ Switch to the Antigravity IDE chat. Run `/threshold-plan bike to Zilker at 1pm`.
 If the skill didn't ship live, run `npm run threshold-plan -- --demo sf-route` in a terminal window instead and call it out:
 
 > "I shipped the portable skill runner; the Antigravity registration is the screencap in `docs/antigravity-skill.md`."
+
+If you're tight on time, **cut this beat** — Cinematic Preview is the stronger close.
 
 ### 2:05 – 2:30 — McpReplay safety net (disclose openly)
 
@@ -72,12 +86,14 @@ Open `src/lib/agents/managedAgents.ts` in the IDE.
 
 ## Pre-stage prep checklist
 
-- [ ] Browser tab 1: production dashboard (`/`), live agent path warmed up.
+- [ ] Browser tab 1: production dashboard (`/`), live agent path warmed up, Zilker preset loaded (red-flag DELAY verdict is the most dramatic).
 - [ ] Browser tab 2: `?replay=<known-good-runId>` for the safety net beat.
 - [ ] Browser tab 3: `/trace/<runId>` for the span tree walk.
+- [ ] **Test the Cinematic Preview button** once before going on stage — confirm the journey banner shows arrival clocks + projected WBGT + flag escalation. If wet-bulb stays static the URL is missing the `time=` param.
 - [ ] Terminal: `npm run threshold-plan -- --demo zilker-bike` queued.
 - [ ] IDE: `src/lib/agents/managedAgents.ts` already open and scrolled to `SUBAGENT_SPECS`.
 - [ ] Antigravity (if shipped): `/threshold-plan` skill registered, chat panel open.
+- [ ] Speaker volume up: the preview mode voices "Flag rising to red at Crissy Field, 88 degrees wet bulb" — that line is the demo punchline.
 - [ ] Phone: 30-second screen recording of the happy path queued as last-resort backup.
 
 ## What to never say on stage

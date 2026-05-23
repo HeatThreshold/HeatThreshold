@@ -1049,7 +1049,7 @@ function Dashboard() {
             {/* Real 3D WebXR and Simulator Experience */}
             <iframe
               ref={xrIframeRef}
-              src={`/xr.html?mode=${xrMode}&verdict=${encodeURIComponent(currentPlan.verdict)}&headline=${encodeURIComponent(currentPlan.headline)}&reasoning=${encodeURIComponent(currentPlan.reasoning)}&wetBulb=${currentPlan.wetBulbPeakF}&flag=${currentPlan.flag}&spatial=${encodeURIComponent(JSON.stringify(currentPlan.spatial))}&stops=${encodeURIComponent(JSON.stringify(currentPlan.coolingStops))}&breaks=${encodeURIComponent(JSON.stringify(currentPlan.suggestedBreaks || []))}&watch=${isWatching ? '1' : '0'}&gmpKey=${encodeURIComponent(process.env.GOOGLE_MAPS_PLATFORM_KEY || '')}`}
+              src={`/xr.html?mode=${xrMode}&verdict=${encodeURIComponent(currentPlan.verdict)}&headline=${encodeURIComponent(currentPlan.headline)}&reasoning=${encodeURIComponent(currentPlan.reasoning)}&wetBulb=${currentPlan.wetBulbPeakF}&flag=${currentPlan.flag}&spatial=${encodeURIComponent(JSON.stringify(currentPlan.spatial))}&stops=${encodeURIComponent(JSON.stringify(currentPlan.coolingStops))}&breaks=${encodeURIComponent(JSON.stringify(currentPlan.suggestedBreaks || []))}&time=${encodeURIComponent(currentPlan.request.time || '14:30')}&activity=${encodeURIComponent(currentPlan.request.activity || '')}&watch=${isWatching ? '1' : '0'}&gmpKey=${encodeURIComponent(process.env.GOOGLE_MAPS_PLATFORM_KEY || '')}`}
               className="w-full h-96 md:h-[500px] border border-slate-800 rounded-xl bg-slate-950 mb-4 shadow-inner"
               title="Spatial XR Immersive Timeline HUD"
               allow="camera; microphone; geolocation"

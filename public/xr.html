@@ -80,13 +80,76 @@
       let flagRule = urlParams.get('flag') || 'white';
       const watchMode = urlParams.get('watch') === '1';
       const gmpKey = urlParams.get('gmpKey') || '';
+      const activityText = urlParams.get('activity') || '';
+      const startTimeStr = urlParams.get('time') || '14:30';
       // Experience mode: 'static' (default — just rotate gently),
-      //                  'preview' (cinematic fly-through that highlights each
-      //                             node in sequence; impressive demo beat),
+      //                  'preview' (simulated journey — advance time per stop,
+      //                             project wet-bulb at arrival from diurnal
+      //                             curve, recolor node by projected flag),
       //                  'live'    (geolocation-driven "you are here" beacon).
       const xrMode = urlParams.get('mode') === 'preview' || urlParams.get('mode') === 'live'
         ? urlParams.get('mode')
         : 'static';
+
+      // --- Journey simulation helpers (preview mode) ---------------------------
+      // Walking-pace defaults; the activity string can bump us to biking pace.
+      const isBiking = /bike|biking|cycling/i.test(activityText);
+      const PACE_MPS = isBiking ? 4.5 : 1.35;
+
+      // Parse "14:30" / "2:30 PM" / "14:30:00" to a minutes-since-midnight integer.
+      function parseTimeToMinutes(s) {
+        if (!s) return 14 * 60 + 30;
+        const ampmMatch = s.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+        if (!ampmMatch) return 14 * 60 + 30;
+        let h = parseInt(ampmMatch[1], 10);
+        const m = parseInt(ampmMatch[2], 10);
+        const ampm = (ampmMatch[3] || '').toUpperCase();
+        if (ampm === 'PM' && h !== 12) h += 12;
+        if (ampm === 'AM' && h === 12) h = 0;
+        return h * 60 + m;
+      }
+      function formatMinutesToClock(mins) {
+        const m = ((mins % 1440) + 1440) % 1440;
+        const h24 = Math.floor(m / 60);
+        const mm = String(m % 60).padStart(2, '0');
+        const ampm = h24 >= 12 ? 'PM' : 'AM';
+        const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+        return `${h12}:${mm} ${ampm}`;
+      }
+      const journeyStartMinutes = parseTimeToMinutes(startTimeStr);
+
+      // Diurnal wet-bulb curve scaled by the synthesis-reported peak. Peak at 3PM,
+      // trough at 5AM, swing range scales with peak (hotter days = bigger swing).
+      // This mirrors the dashboard's trendData logic so the preview matches the
+      // sparkline curve a user just looked at.
+      function projectWetBulbAt(absoluteMinutes) {
+        const peakF = wetBulb || 72;
+        const hour = (absoluteMinutes / 60 + 24) % 24;
+        // cos(0)=1 at hour=15. Range scales with peak.
+        const swing = peakF > 75 ? 10 : 6;
+        const factor = Math.cos(((hour - 15) / 24) * 2 * Math.PI);
+        return Math.round(peakF - (swing / 2) * (1 - factor));
+      }
+      function flagForWetBulb(wbF) {
+        if (wbF < 80) return 'white';
+        if (wbF < 85) return 'green';
+        if (wbF < 88) return 'yellow';
+        if (wbF < 90) return 'red';
+        return 'black';
+      }
+      // Haversine — local copy to avoid a cyclic ref. Used only in preview mode
+      // to convert cumulative geo-distance into a simulated journey clock.
+      function haversineMetersLatLng(p1, p2) {
+        const R = 6371e3;
+        const phi1 = (p1.lat * Math.PI) / 180;
+        const phi2 = (p2.lat * Math.PI) / 180;
+        const dPhi = ((p2.lat - p1.lat) * Math.PI) / 180;
+        const dLambda = ((p2.lng - p1.lng) * Math.PI) / 180;
+        const a =
+          Math.sin(dPhi / 2) * Math.sin(dPhi / 2) +
+          Math.cos(phi1) * Math.cos(phi2) * Math.sin(dLambda / 2) * Math.sin(dLambda / 2);
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      }
 
       let spatialData = { origin: null, waypoints: [], headingNote: 'None', directionsPath: [], navigationArrows: [], sunSamples: [] };
       try {
@@ -203,44 +266,107 @@
           }
         }
 
-        // Visible target list used by preview mode — origin, waypoints, refuges, and
-        // break beacons. We resolve from the existing arrays so the cycle reflects
-        // whatever the current spatial data describes.
+        // Visible target list used by preview mode — origin, waypoints, refuges,
+        // and break beacons, each tagged with lat/lng and cumulative geographic
+        // distance from origin. Walking the source data (instead of just iterating
+        // routeNodes) means the order matches buildSpatialCoordinates exactly
+        // AND we get the GPS coords needed for the simulated journey clock.
         previewTargets() {
+          if (this._cachedPreviewTargets) return this._cachedPreviewTargets;
+
           const targets = [];
-          for (const node of this.routeNodes) {
+          if (!spatialData.origin) return [];
+
+          const origin = spatialData.origin;
+          targets.push({
+            mesh: this.routeNodes[0],
+            lat: origin.lat,
+            lng: origin.lng,
+            label: origin.label,
+            kind: 'origin',
+            details: 'Line Departure Point'
+          });
+          (spatialData.waypoints || []).forEach((wp, i) => {
             targets.push({
-              mesh: node,
-              label: node.userData.label || node.name,
-              details: node.userData.details || ''
+              mesh: this.routeNodes[1 + i],
+              lat: wp.lat,
+              lng: wp.lng,
+              label: wp.label,
+              kind: 'waypoint',
+              details: `Waypoint #${i + 1}`
             });
-          }
-          for (const { orb } of this.breakBeacons) {
+          });
+          coolingStops.forEach((stop, i) => {
             targets.push({
-              mesh: orb,
-              label: orb.userData.label || 'Break',
-              details: orb.userData.details || ''
+              mesh: this.routeNodes[1 + (spatialData.waypoints || []).length + i],
+              lat: stop.lat,
+              lng: stop.lng,
+              label: stop.name,
+              kind: 'refuge',
+              details: stop.why || 'Hydration / shade refuge'
             });
+          });
+          suggestedBreaks.forEach((b, i) => {
+            const beacon = this.breakBeacons[i];
+            if (!beacon) return;
+            targets.push({
+              mesh: beacon.orb,
+              lat: b.lat,
+              lng: b.lng,
+              label: beacon.orb.userData.label || `Break ${i + 1}`,
+              kind: 'break',
+              details: `${b.label} · +${b.timeOffsetMinutes}min · ${b.durationMinutes}min`,
+              timeOffsetMinutes: b.timeOffsetMinutes
+            });
+          });
+
+          // Compute cumulative-from-origin distance + simulated arrival clock.
+          let cumMeters = 0;
+          for (let i = 0; i < targets.length; i++) {
+            if (i > 0) {
+              cumMeters += haversineMetersLatLng(
+                { lat: targets[i - 1].lat, lng: targets[i - 1].lng },
+                { lat: targets[i].lat, lng: targets[i].lng }
+              );
+            }
+            targets[i].cumulativeMeters = Math.round(cumMeters);
+            // Prefer the agent-provided timeOffsetMinutes for break beacons since
+            // those include the rest-duration accumulation; everything else uses
+            // simple pace × distance.
+            const minutesFromStart = targets[i].timeOffsetMinutes != null
+              ? targets[i].timeOffsetMinutes
+              : Math.round(cumMeters / PACE_MPS / 60);
+            const absoluteMinutes = journeyStartMinutes + minutesFromStart;
+            targets[i].minutesFromStart = minutesFromStart;
+            targets[i].arrivalClock = formatMinutesToClock(absoluteMinutes);
+            const projectedWb = projectWetBulbAt(absoluteMinutes);
+            targets[i].projectedWetBulbF = projectedWb;
+            targets[i].projectedFlag = flagForWetBulb(projectedWb);
           }
+
+          this._cachedPreviewTargets = targets;
           return targets;
         }
 
         buildPreviewBanner() {
-          // Float a slim status panel above the route table that announces the
-          // current node in the cycle.
+          // Three-row status panel: title, current stop, simulated clock + WBGT.
           this.previewPanel = new xb.SpatialPanel({
-            width: 1.1, height: 0.18, backgroundColor: '#0f172af2', useDefaultPosition: false
+            width: 1.15, height: 0.28, backgroundColor: '#0f172af2', useDefaultPosition: false
           });
           const grid = this.previewPanel.addGrid();
-          grid.addRow({ weight: 1 }).addText({
-            text: '◆ CINEMATIC PREVIEW',
-            fontColor: '#fbbc05', fontSize: 0.038, textAlign: 'center'
+          grid.addRow({ weight: 0.28 }).addText({
+            text: `◆ JOURNEY PREVIEW · ${isBiking ? 'BIKING' : 'WALKING'} @ ${PACE_MPS.toFixed(1)} m/s`,
+            fontColor: '#fbbc05', fontSize: 0.034, textAlign: 'center'
           });
-          this.previewBannerText = grid.addRow({ weight: 1 }).addText({
-            text: 'Cycling through every node along the route…',
-            fontColor: '#ffffff', fontSize: 0.03, textAlign: 'center'
+          this.previewBannerText = grid.addRow({ weight: 0.4 }).addText({
+            text: 'Simulating your trip…',
+            fontColor: '#ffffff', fontSize: 0.034, textAlign: 'center'
           });
-          this.previewPanel.position.set(0, 1.9, -1.6);
+          this.previewHeatText = grid.addRow({ weight: 0.32 }).addText({
+            text: `Start ${formatMinutesToClock(journeyStartMinutes)} · forecast peak ${wetBulb}°F WBGT (${flagRule.toUpperCase()})`,
+            fontColor: '#94a3b8', fontSize: 0.028, textAlign: 'center'
+          });
+          this.previewPanel.position.set(0, 1.95, -1.6);
           this.add(this.previewPanel);
         }
 
@@ -255,29 +381,70 @@
             if (this.previewHighlightNode.material?.emissiveIntensity != null) {
               this.previewHighlightNode.material.emissiveIntensity = 0.25;
             }
+            // Restore the node's original color (we tinted it by projected flag)
+            const orig = this.previewHighlightNode.userData?.originalColor;
+            if (orig != null && this.previewHighlightNode.material?.color) {
+              this.previewHighlightNode.material.color.setHex(orig);
+              if (this.previewHighlightNode.material.emissive) {
+                this.previewHighlightNode.material.emissive.setHex(orig);
+              }
+            }
           }
 
           const t = targets[this.previewIndex % targets.length];
           this.previewIndex = (this.previewIndex + 1) % targets.length;
           this.previewNextSwitchAt = this.animationTime + this.previewCycleSecs;
 
-          // Highlight current target
-          t.mesh.scale.setScalar(1.55);
+          // Tint the mesh by the projected flag at the simulated arrival time
+          // so the cycle visually shows heat rising as the journey progresses.
+          const flagHex = (flagColors[t.projectedFlag] || flagColors.white).hex;
+          if (t.mesh.material?.color) {
+            t.mesh.material.color.setHex(flagHex);
+            if (t.mesh.material.emissive) {
+              t.mesh.material.emissive.setHex(flagHex);
+            }
+          }
+          t.mesh.scale.setScalar(1.6);
           if (t.mesh.material?.emissiveIntensity != null) {
-            t.mesh.material.emissiveIntensity = 0.95;
+            t.mesh.material.emissiveIntensity = 1.0;
           }
           this.previewHighlightNode = t.mesh;
 
-          // Announce in the panel
+          // Announce in the panel — current stop + arrival clock + projected WBGT
+          const kindGlyph = {
+            origin: '◉',
+            waypoint: '◆',
+            refuge: '✚',
+            break: '💧'
+          }[t.kind] || '•';
+          const distanceLabel = t.cumulativeMeters >= 1000
+            ? `${(t.cumulativeMeters / 1000).toFixed(1)} km`
+            : `${t.cumulativeMeters} m`;
           if (this.previewBannerText?.setText) {
-            this.previewBannerText.setText(`${t.label.toUpperCase()}\n${t.details}`);
+            this.previewBannerText.setText(`${kindGlyph} ${t.label.toUpperCase()}\n+${t.minutesFromStart}min · ${distanceLabel} from start`);
+          }
+          if (this.previewHeatText?.setText) {
+            const flagLabel = t.projectedFlag.toUpperCase();
+            this.previewHeatText.setText(`Arrive ${t.arrivalClock} · projected ${t.projectedWetBulbF}°F WBGT · ${flagLabel} FLAG`);
           }
 
-          // Slow camera-orbit: gently rotate the route group so the highlighted
-          // mesh swings toward the viewer (front of the projection, -Z in local).
+          // Aim the group's Y rotation so the target ends up at -Z (front).
           const targetAngle = Math.atan2(t.mesh.position.x, -t.mesh.position.z);
-          // Aim the group's Y rotation so the target ends up at -Z.
           this.previewTargetGroupY = -targetAngle;
+
+          // Voice the rising-heat moments: speak the flag if it differs from
+          // the previous tick. Powerful demo beat without manual narration.
+          if (t.projectedFlag !== this.previousProjectedFlag && this.previousProjectedFlag != null) {
+            const msg = `Flag rising to ${t.projectedFlag} at ${t.label}, ${t.projectedWetBulbF} degrees wet bulb.`;
+            try {
+              if (xb.core.sound.speechSynthesizer) {
+                xb.core.sound.speechSynthesizer.speak(msg);
+              } else if (window.speechSynthesis) {
+                window.speechSynthesis.speak(new SpeechSynthesisUtterance(msg));
+              }
+            } catch { /* ignore */ }
+          }
+          this.previousProjectedFlag = t.projectedFlag;
 
           xb.core.sound.soundSynthesizer.playPresetTone('CLICK', 0.4);
         }
