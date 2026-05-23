@@ -97,13 +97,25 @@ The trace/record/replay stack is the demo safety net and the secondary technical
 
 ## Live demo
 
+<!-- DEMO_URLS · update the four `TODO_` values below before submission. -->
+
 | Resource | URL |
 |---|---|
-| Production dashboard | *(TBD on submission)* |
-| Trace viewer | `<host>/trace/<runId>` (every run's id chip links here) |
-| Demo presets | `<host>/?demo=sf-route` · `?demo=zilker-bike` · `?demo=hyde-park` |
-| McpReplay safety net | `<host>/?replay=<runId>` |
-| 1-min demo video | *(linked at submission time)* |
+| **Production dashboard** | `TODO_PROD_URL` |
+| **1-min demo video** | `TODO_VIDEO_URL` |
+| Trace viewer | `TODO_PROD_URL/trace/TODO_RUNID` |
+| Demo presets | `TODO_PROD_URL/?demo=sf-route` · `?demo=zilker-bike` · `?demo=hyde-park` |
+| McpReplay safety net | `TODO_PROD_URL/?replay=TODO_RUNID` |
+
+To replace all five at once:
+
+```bash
+sed -i.bak \
+  -e 's|TODO_PROD_URL|https://heat-threshold.vercel.app|g' \
+  -e 's|TODO_VIDEO_URL|https://youtu.be/XXXXXXXXXXX|g' \
+  -e 's|TODO_RUNID|abc123de-...|g' \
+  README.md && rm README.md.bak
+```
 
 Each preset generates a different verdict shape so the dashboard never looks empty.
 
