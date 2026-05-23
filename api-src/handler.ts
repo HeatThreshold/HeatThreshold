@@ -1,4 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'http';
+// Note the relative path: this file lives in api-src/, the createApp source
+// lives in src/server/. esbuild follows this import statically during the
+// vercel-build step (see vercel.json buildCommand) and inlines the entire
+// orchestrator chain into a single bundled api/index.js that Vercel deploys.
 import { createApp } from '../src/server/createApp';
 
 /**
