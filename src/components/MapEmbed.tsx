@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { SpatialData, CoolingStop } from '../lib/types';
-import { MapPin, Navigation, Info, Lock } from 'lucide-react';
+import { MapPin, Navigation, Info, Lock, Droplet } from 'lucide-react';
 import { APIProvider, Map, AdvancedMarker, Pin, InfoWindow, useMap } from '@vis.gl/react-google-maps';
 
 interface MapEmbedProps {
@@ -8,24 +8,116 @@ interface MapEmbedProps {
   coolingStops: CoolingStop[];
 }
 
-// Custom hook to draw a polyline on the Google Map
+/**
+ * MapController — auto-frames the route every time the spatial data or cooling
+ * stops change. Without this, Google Maps' `defaultCenter` is non-reactive and
+ * the map stays stuck on whatever location was active when the dashboard
+ * mounted — switching presets leaves the map orphaned.
+ */
+function MapController({ spatial, coolingStops }: MapEmbedProps) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (!map) return;
+    if (typeof window === 'undefined' || !window.google?.maps) return;
+
+    const bounds = new google.maps.LatLngBounds();
+    bounds.extend({ lat: spatial.origin.lat, lng: spatial.origin.lng });
+    spatial.waypoints.forEach(wp => {
+      if (wp.lat && wp.lng) bounds.extend({ lat: wp.lat, lng: wp.lng });
+    });
+    coolingStops.forEach(stop => {
+      if (stop.lat && stop.lng) bounds.extend({ lat: stop.lat, lng: stop.lng });
+    });
+
+    // Pad the framing so markers aren't hugging the edges of the viewport.
+    map.fitBounds(bounds, { top: 60, right: 40, bottom: 60, left: 40 });
+  }, [
+    map,
+    spatial.origin.lat,
+    spatial.origin.lng,
+    JSON.stringify(spatial.waypoints),
+    JSON.stringify(coolingStops.map(s => [s.lat, s.lng]))
+  ]);
+
+  return null;
+}
+
+/**
+ * RoutePolyline — beautified route trace. Three layers stacked:
+ *   1. A wide soft halo for visual weight against satellite tiles
+ *   2. The main indigo stroke
+ *   3. An animated chevron symbol that travels along the path for motion
+ */
 function RoutePolyline({ points }: { points: Array<{ lat: number; lng: number }> }) {
   const map = useMap();
 
   useEffect(() => {
     if (!map || points.length < 2) return;
-    const polyline = new google.maps.Polyline({
+    if (typeof window === 'undefined' || !window.google?.maps) return;
+
+    // Layer 1 — halo (wide, low opacity) for visual weight
+    const halo = new google.maps.Polyline({
       path: points,
       geodesic: true,
-      strokeColor: '#6366f1',
-      strokeOpacity: 0.8,
-      strokeWeight: 4,
+      strokeColor: '#a5b4fc',
+      strokeOpacity: 0.45,
+      strokeWeight: 10,
+      zIndex: 1
     });
-    polyline.setMap(map);
-    return () => {
-      polyline.setMap(null);
+    halo.setMap(map);
+
+    // Layer 2 — main stroke
+    const mainLine = new google.maps.Polyline({
+      path: points,
+      geodesic: true,
+      strokeColor: '#4f46e5',
+      strokeOpacity: 0.95,
+      strokeWeight: 4,
+      zIndex: 2
+    });
+    mainLine.setMap(map);
+
+    // Layer 3 — animated travelling chevron
+    const arrowSymbol: google.maps.Symbol = {
+      path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+      scale: 3,
+      strokeColor: '#ffffff',
+      strokeOpacity: 1,
+      fillColor: '#1a73e8',
+      fillOpacity: 1
     };
-  }, [map, points]);
+    const travelLine = new google.maps.Polyline({
+      path: points,
+      geodesic: true,
+      strokeColor: '#1a73e8',
+      strokeOpacity: 0,
+      strokeWeight: 4,
+      icons: [{ icon: arrowSymbol, offset: '0%' }],
+      zIndex: 3
+    });
+    travelLine.setMap(map);
+
+    // Animate the symbol's offset along the path. 60fps step at 0.6%/frame
+    // means a full lap every ~3s, which feels deliberate but not hectic.
+    let raf = 0;
+    let offset = 0;
+    const tick = () => {
+      offset = (offset + 0.6) % 100;
+      const icons = travelLine.get('icons');
+      icons[0].offset = `${offset}%`;
+      travelLine.set('icons', icons);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      halo.setMap(null);
+      mainLine.setMap(null);
+      travelLine.setMap(null);
+    };
+  }, [map, JSON.stringify(points)]);
 
   return null;
 }
@@ -244,39 +336,65 @@ export function MapEmbed({ spatial, coolingStops }: MapEmbedProps) {
                 defaultCenter={{ lat: spatial.origin.lat, lng: spatial.origin.lng }}
                 defaultZoom={13}
                 gestureHandling="cooperative"
-                disableDefaultUI={false}
+                disableDefaultUI={true}
+                zoomControl={true}
+                fullscreenControl={true}
+                clickableIcons={false}
+                colorScheme="LIGHT"
                 // CRITICAL SECURITY REQUIREMENT FOR GOOGLE MAPS SKILL
                 internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
                 className="w-full h-full"
               >
-                {/* Origin Marker */}
+                {/* Auto-frame the route whenever spatial data changes */}
+                <MapController spatial={spatial} coolingStops={coolingStops} />
+
+                {/* Origin Marker — heavier visual weight */}
                 <AdvancedMarker
                   position={{ lat: spatial.origin.lat, lng: spatial.origin.lng }}
-                  title={`[O] ${spatial.origin.label}`}
+                  title={`Origin · ${spatial.origin.label}`}
+                  zIndex={100}
                 >
-                  <Pin background="#1a73e8" borderColor="#1557b0" glyphColor="#ffffff" glyph="O" />
+                  <Pin
+                    background="#1a73e8"
+                    borderColor="#0b3d91"
+                    glyphColor="#ffffff"
+                    glyph="●"
+                    scale={1.3}
+                  />
                 </AdvancedMarker>
 
-                {/* Waypoints */}
+                {/* Waypoints — amber numbered pins */}
                 {spatial.waypoints.map((wp, i) => (
                   <AdvancedMarker
-                    key={`wp-${i}`}
+                    key={`wp-${i}-${wp.lat}-${wp.lng}`}
                     position={{ lat: wp.lat, lng: wp.lng }}
-                    title={`Waypoint ${i + 1}: ${wp.label}`}
+                    title={`Waypoint ${i + 1} · ${wp.label}`}
+                    zIndex={50}
                   >
-                    <Pin glyph={(i + 1).toString()} />
+                    <Pin
+                      background="#f59e0b"
+                      borderColor="#b45309"
+                      glyphColor="#ffffff"
+                      glyph={(i + 1).toString()}
+                    />
                   </AdvancedMarker>
                 ))}
 
-                {/* Cooling Stops */}
+                {/* Cooling Stops — emerald hydration pins */}
                 {coolingStops.map((stop) => (
                   <AdvancedMarker
                     key={`stop-${stop.placeId}`}
                     position={{ lat: stop.lat, lng: stop.lng }}
-                    title={`[✚] ${stop.name}`}
+                    title={`Refuge · ${stop.name}`}
                     onClick={() => setSelectedStop(stop)}
+                    zIndex={75}
                   >
-                    <Pin background="#10b981" borderColor="#059669" glyphColor="#ffffff" glyph="+" />
+                    <Pin
+                      background="#10b981"
+                      borderColor="#047857"
+                      glyphColor="#ffffff"
+                      glyph="✚"
+                    />
                   </AdvancedMarker>
                 ))}
 
@@ -284,34 +402,61 @@ export function MapEmbed({ spatial, coolingStops }: MapEmbedProps) {
                   <InfoWindow
                     position={{ lat: selectedStop.lat, lng: selectedStop.lng }}
                     onCloseClick={() => setSelectedStop(null)}
+                    pixelOffset={[0, -38]}
                   >
-                    <div className="p-1.5 max-w-[200px] text-slate-800 font-sans">
-                      <p className="font-bold text-xs text-slate-900">{selectedStop.name}</p>
-                      <p className="text-[10px] text-slate-500 mt-1 leading-snug">{selectedStop.why}</p>
-                      {selectedStop.mapsUri && (
-                        <div className="mt-2.5 text-right">
+                    <div className="p-2 max-w-[240px] text-slate-800 font-sans">
+                      <div className="flex items-center gap-1.5 mb-1">
+                        <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-emerald-100 border border-emerald-300">
+                          <span className="text-emerald-700 text-[10px] font-black">✚</span>
+                        </span>
+                        <p className="font-bold text-xs text-slate-900 leading-tight">{selectedStop.name}</p>
+                      </div>
+                      <p className="text-[10px] text-slate-500 leading-snug">{selectedStop.why}</p>
+                      <div className="mt-2 flex items-center gap-1.5">
+                        <span className="text-[9px] font-mono font-bold bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded border border-slate-200">
+                          {selectedStop.distanceMeters >= 1000
+                            ? `${(selectedStop.distanceMeters / 1000).toFixed(1)} km`
+                            : `${selectedStop.distanceMeters} m`} away
+                        </span>
+                        {selectedStop.mapsUri && (
                           <a
                             href={selectedStop.mapsUri}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="inline-flex items-center gap-0.5 px-2 py-1 bg-[#1a73e8] text-white hover:bg-[#1557b0] text-[9px] font-bold rounded shadow-xs"
+                            className="ml-auto inline-flex items-center gap-1 px-2 py-1 bg-[#1a73e8] text-white hover:bg-[#1557b0] text-[9px] font-bold rounded shadow-sm uppercase tracking-tight"
                           >
-                            <span>Navigate ↗</span>
+                            Navigate ↗
                           </a>
-                        </div>
-                      )}
+                        )}
+                      </div>
                     </div>
                   </InfoWindow>
                 )}
 
-                {/* Direct Polyline Connection */}
-                <RoutePolyline 
+                {/* Direct Polyline Connection — halo + main + animated chevron */}
+                <RoutePolyline
                   points={[
                     { lat: spatial.origin.lat, lng: spatial.origin.lng },
                     ...spatial.waypoints.map(wp => ({ lat: wp.lat, lng: wp.lng }))
                   ]}
                 />
               </Map>
+
+              {/* Floating legend chip — orients the viewer without taking up map real estate */}
+              <div className="pointer-events-none absolute bottom-3 left-3 z-10 bg-white/95 backdrop-blur-sm border border-slate-200 rounded-lg shadow-md px-2.5 py-1.5 text-[9px] font-mono font-bold uppercase tracking-tight text-slate-700 flex items-center gap-2.5">
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-[#1a73e8] border border-[#0b3d91]"></span>
+                  Origin
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-[#f59e0b] border border-[#b45309]"></span>
+                  Waypoint
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-[#10b981] border border-[#047857]"></span>
+                  Refuge
+                </span>
+              </div>
             </div>
           </APIProvider>
         ) : hasMapError ? (
