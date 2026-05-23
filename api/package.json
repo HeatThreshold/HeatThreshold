@@ -1,0 +1,4 @@
+{
+  "_comment": "Forces this directory to be treated as CommonJS by Vercel's @vercel/node runtime, overriding the project-level 'type': 'module'. CJS lets esbuild bundle the entire src/ import chain into a single function output — ESM mode was leaving cross-directory imports unresolved, producing 'Cannot find module /var/task/src/server/createApp' at cold start. The rest of the project keeps using ESM via the root package.json.",
+  "type": "commonjs"
+}
