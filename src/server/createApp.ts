@@ -1,10 +1,43 @@
 import express from 'express';
+import { GoogleGenAI } from '@google/genai';
 import { runOrchestrationGraph, runWatchTick } from '../lib/agents/orchestrator';
 import { getHourlyForecasts } from '../lib/weatherService';
 import { demoFixtures } from '../lib/demoFixtures';
 import { PlanResult } from '../lib/types';
 import { loadRecording } from '../lib/observability/mcpreplay';
 import { listRecordings } from '../lib/observability/mcptape';
+
+// Live API bridge: the browser holds the bidirectional WebSocket to Gemini,
+// but the API key never leaves the server. We mint a single-use ephemeral
+// token locked to a Live-capable model + the runThresholdPlan tool. The
+// browser uses the token to ai.live.connect(...) directly. When the model
+// emits a functionCall, the browser POSTs back to /api/plan and replies
+// with a functionResponse — the same orchestrator the dashboard already uses.
+const LIVE_API_MODEL = process.env.LIVE_API_MODEL || 'gemini-2.5-flash-preview-native-audio-dialog';
+
+const LIVE_SYSTEM_INSTRUCTION = [
+  'You are Heat Threshold, a voice front-end for an outdoor-activity scheduling tool.',
+  'Greet the user once, briefly. Ask for three things if missing: a location, the activity, and a start time (HH:MM).',
+  'As soon as you have all three, call the runThresholdPlan tool. Do not narrate the call.',
+  'When the tool returns, read aloud the verdict (GO / DELAY / CONSIDER ALTERNATE), the one-line headline, and the peak wet-bulb temperature. Keep it under 25 words.',
+  'Stay scoped to outdoor-activity scheduling and heat safety. You are NOT a medical advisor — never diagnose, never recommend treatment, never discuss symptoms. If asked, redirect to a healthcare professional.',
+].join(' ');
+
+const RUN_THRESHOLD_PLAN_TOOL = {
+  functionDeclarations: [{
+    name: 'runThresholdPlan',
+    description: 'Run the Heat Threshold managed-agents scheduling graph for a given location, activity, and start time. Returns a go/delay/alternate verdict with reasoning and refuges.',
+    parameters: {
+      type: 'object',
+      properties: {
+        location: { type: 'string', description: 'Free-form location, e.g. "Zilker Park, Austin" or "SF Ferry Building".' },
+        activity: { type: 'string', description: 'Activity description, e.g. "biking", "running with kids", "outdoor wedding".' },
+        time:     { type: 'string', description: 'Start time in HH:MM 24-hour format.' }
+      },
+      required: ['location', 'activity', 'time']
+    }
+  }]
+};
 
 export function createApp() {
   const app = express();
@@ -114,6 +147,46 @@ export function createApp() {
         error: err?.message || String(err) || 'Watch tick failed',
         name: err?.name,
         stack: err?.stack?.split('\n').slice(0, 5).join('\n')
+      });
+    }
+  });
+
+  // Mint an ephemeral Gemini auth token bound to the Live API. The token is
+  // single-use (uses: 1), expires in 30 minutes, and locks the model +
+  // tool declaration + system instruction so the browser can't escalate.
+  // See https://ai.google.dev/gemini-api/docs/ephemeral-tokens
+  app.post('/api/live/token', async (_req, res) => {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.status(503).json({ error: 'GEMINI_API_KEY not configured' });
+    }
+    try {
+      // Ephemeral tokens are v1alpha only — separate client from the rest of
+      // the app to avoid disturbing the Managed Agents pipeline.
+      const liveAi = new GoogleGenAI({ apiKey, apiVersion: 'v1alpha' } as any);
+      const now = Date.now();
+      const token = await (liveAi as any).authTokens.create({
+        config: {
+          uses: 1,
+          expireTime: new Date(now + 30 * 60_000).toISOString(),
+          newSessionExpireTime: new Date(now + 2 * 60_000).toISOString(),
+          liveConnectConstraints: {
+            model: LIVE_API_MODEL,
+            config: {
+              responseModalities: ['AUDIO'],
+              systemInstruction: LIVE_SYSTEM_INSTRUCTION,
+              tools: [RUN_THRESHOLD_PLAN_TOOL]
+            }
+          },
+          lockAdditionalFields: ['systemInstruction', 'tools', 'responseModalities']
+        }
+      });
+      res.json({ token: token?.name, model: LIVE_API_MODEL });
+    } catch (err: any) {
+      console.error('[Server Error] /api/live/token error:', err);
+      res.status(500).json({
+        error: err?.message || 'Failed to mint ephemeral Live API token',
+        hint: 'Verify GEMINI_API_KEY has Live API + ephemeral-token access and that LIVE_API_MODEL is a Live-capable model.'
       });
     }
   });

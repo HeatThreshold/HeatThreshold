@@ -1,24 +1,28 @@
 import type { IncomingMessage, ServerResponse } from 'http';
+import { createApp } from '../src/server/createApp';
 
 /**
- * Vercel serverless entry. The Express app is constructed lazily inside the
- * handler so any thrown error during createApp() can be returned as a real
- * JSON response instead of triggering FUNCTION_INVOCATION_FAILED (the Vercel
- * HTML page that swallows the stack).
+ * Vercel serverless entry. The createApp() call is deferred to first request
+ * (so we can catch + report errors as JSON), but the IMPORT itself is static
+ * so esbuild bundles the whole orchestrator chain into the function output.
  *
- * /api/_diag is a special preflight that responds before createApp is even
- * imported — useful when the orchestrator chain itself is the failure point.
+ * /api/_diag is a special preflight that responds before createApp() runs —
+ * useful when the constructor itself is the failure point.
  */
 
-let appPromise: Promise<(req: IncomingMessage, res: ServerResponse) => void> | null = null;
-async function getApp() {
-  if (!appPromise) {
-    appPromise = (async () => {
-      const mod = await import('../src/server/createApp');
-      return mod.createApp() as unknown as (req: IncomingMessage, res: ServerResponse) => void;
-    })();
+let app: ((req: IncomingMessage, res: ServerResponse) => void) | null = null;
+let constructError: Error | null = null;
+
+function getApp() {
+  if (!app && !constructError) {
+    try {
+      app = createApp() as unknown as (req: IncomingMessage, res: ServerResponse) => void;
+    } catch (err: any) {
+      constructError = err instanceof Error ? err : new Error(String(err));
+    }
   }
-  return appPromise;
+  if (constructError) throw constructError;
+  return app!;
 }
 
 function writeJson(res: ServerResponse, status: number, body: unknown) {
@@ -27,9 +31,7 @@ function writeJson(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
-export default async function handler(req: IncomingMessage, res: ServerResponse) {
-  // Pre-createApp diagnostic. Works even when the orchestrator chain blows up
-  // on import — answers the question "is the function even loading?"
+export default function handler(req: IncomingMessage, res: ServerResponse) {
   if ((req.url || '').startsWith('/api/_diag')) {
     return writeJson(res, 200, {
       ok: true,
@@ -49,8 +51,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   }
 
   try {
-    const app = await getApp();
-    return app(req, res);
+    const a = getApp();
+    return a(req, res);
   } catch (err: any) {
     console.error('[api/index] Failed to construct app:', err);
     return writeJson(res, 500, {
